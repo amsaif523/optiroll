@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 const initDB = async () => {
@@ -14,7 +15,28 @@ const initDB = async () => {
   await connection.query(`CREATE DATABASE IF NOT EXISTS ${dbName} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
   await connection.query(`USE ${dbName}`);
 
-  // ROLLS — fresh material inventory (width only, infinite length conceptually)
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      username VARCHAR(50) NOT NULL UNIQUE,
+      password_hash VARCHAR(255) NOT NULL,
+      full_name VARCHAR(100) NOT NULL,
+      role ENUM('admin','operator') DEFAULT 'operator',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Seed default admin if not exists
+  const [existing] = await connection.query('SELECT id FROM users WHERE username = ?', ['admin']);
+  if (existing.length === 0) {
+    const hash = await bcrypt.hash('admin123', 10);
+    await connection.query(
+      'INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)',
+      ['admin', hash, 'Administrator', 'admin']
+    );
+    console.log('Default admin user created — username: admin / password: admin123');
+  }
+
   await connection.query(`
     CREATE TABLE IF NOT EXISTS rolls (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -30,7 +52,6 @@ const initDB = async () => {
     )
   `);
 
-  // LEFTOVERS — reusable cut sections with material signature
   await connection.query(`
     CREATE TABLE IF NOT EXISTS leftovers (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -50,7 +71,6 @@ const initDB = async () => {
     )
   `);
 
-  // JOBS — work orders
   await connection.query(`
     CREATE TABLE IF NOT EXISTS jobs (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -68,7 +88,6 @@ const initDB = async () => {
     )
   `);
 
-  // JOB_ITEMS — individual pieces in a work order
   await connection.query(`
     CREATE TABLE IF NOT EXISTS job_items (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -88,7 +107,6 @@ const initDB = async () => {
     )
   `);
 
-  // OPTIMIZATION_RESULTS — detailed cut plans per job
   await connection.query(`
     CREATE TABLE IF NOT EXISTS optimization_results (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -107,7 +125,7 @@ const initDB = async () => {
     )
   `);
 
-  console.log('Database initialized');
+  console.log('Database initialized successfully');
   await connection.end();
 };
 

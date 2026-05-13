@@ -5,13 +5,19 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3001',
+  credentials: true,
+}));
 app.use(express.json());
 
-app.use('/api/rolls', require('./routes/rolls'));
-app.use('/api/leftovers', require('./routes/leftovers'));
-app.use('/api/jobs', require('./routes/jobs'));
-app.use('/api/optimize', require('./routes/optimize'));
+const auth = require('./middleware/auth');
+
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/rolls', auth, require('./routes/rolls'));
+app.use('/api/leftovers', auth, require('./routes/leftovers'));
+app.use('/api/jobs', auth, require('./routes/jobs'));
+app.use('/api/optimize', auth, require('./routes/optimize'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'optiroll-backend' });
