@@ -15,7 +15,7 @@ module.exports = {
     },
     {
       name: 'optiroll-frontend',
-      script: 'npm',
+      script: 'node_modules/next/dist/bin/next',
       args: 'start',
       cwd: './optiroll-frontend',
       env: {

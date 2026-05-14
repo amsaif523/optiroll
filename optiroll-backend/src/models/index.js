@@ -120,4 +120,19 @@ const OptimizationResult = {
   deleteByJob: async (jobId) => pool.execute('DELETE FROM optimization_results WHERE job_id = ?', [jobId])
 };
 
-module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, query };
+const Setting = {
+  get: async (key) => {
+    const rows = await query('SELECT `value` FROM settings WHERE `key` = ?', [key]);
+    return rows.length > 0 ? rows[0].value : null;
+  },
+  set: async (key, value) => {
+    const str = typeof value === 'string' ? value : JSON.stringify(value);
+    await pool.execute(
+      'INSERT INTO settings (`key`, `value`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `value` = ?',
+      [key, str, str]
+    );
+  },
+  getAll: async () => query('SELECT * FROM settings ORDER BY `key`'),
+};
+
+module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, Setting, query };

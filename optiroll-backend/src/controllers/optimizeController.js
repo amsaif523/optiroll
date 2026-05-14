@@ -1,5 +1,5 @@
 const Optimizer = require('../services/Optimizer');
-const { OptimizationResult } = require('../models');
+const { OptimizationResult, Setting } = require('../models');
 
 const optimizer = new Optimizer();
 
@@ -11,7 +11,14 @@ const safeParse = (val) => {
 
 exports.run = async (req, res, next) => {
   try {
-    const result = await optimizer.optimizeWorkOrder(req.body);
+    const maxLengthSetting = await Setting.get('max_roll_length');
+    const max_roll_length = req.body.max_roll_length
+      || (maxLengthSetting ? parseFloat(maxLengthSetting) : 30);
+
+    const result = await optimizer.optimizeWorkOrder({
+      ...req.body,
+      max_roll_length
+    });
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);

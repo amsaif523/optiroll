@@ -2,84 +2,98 @@
 
 import { useState } from 'react'
 import { WorkOrderItem } from '@/types'
-import { Plus, Trash2, Layers, Hash, Ruler, ArrowUpDown } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw } from 'lucide-react'
 
-type Unit = 'm' | 'cm' | 'in'
-
-const TO_METERS: Record<Unit, number> = { m: 1, cm: 0.01, in: 0.0254 }
-const toM   = (v: number, u: Unit) => v * TO_METERS[u]
-const fromM = (v: number, u: Unit) => v / TO_METERS[u]
-const fmt   = (v: number) => v.toFixed(2)
+const IN_TO_M = 0.0254
+const fmtDim = (v: number) => v.toFixed(5)
 
 interface Props {
   items: WorkOrderItem[]
   onChange: (items: WorkOrderItem[]) => void
-  rollWidth?: number  // used for per-item width warning
+  availableWidths: number[]
+  allowRotation: boolean
+  onAllowRotationChange: (v: boolean) => void
 }
 
-export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) {
-  const [unit, setUnit] = useState<Unit>('m')
-  const [persistentShade, setPersistentShade] = useState('')
-
+export default function WorkOrderBuilder({
+  items, onChange,
+  availableWidths,
+  allowRotation, onAllowRotationChange,
+}: Props) {
   const [form, setForm] = useState({
     shade_number: '',
     blind_type: 'roller' as 'roller' | 'zebra',
     width:    NaN,
     height:   NaN,
-    valence:  NaN,
+    valence:  6,
     quantity: NaN,
     material_type: 'Polyester',
     color:   'White',
     pattern: 'Plain',
+    selected_widths: [] as number[],
   })
 
-  const unitLabel = unit === 'in' ? '"' : unit
+  const toggleWidth = (w: number) => {
+    const next = form.selected_widths.includes(w)
+      ? form.selected_widths.filter(x => x !== w)
+      : [...form.selected_widths, w].sort((a, b) => a - b)
+    setForm(f => ({ ...f, selected_widths: next }))
+  }
 
   const addItem = () => {
-    if (!form.shade_number.trim())                          { alert('Enter Shade Number'); return }
-    if (isNaN(form.width)  || form.width  <= 0)            { alert('Width must be > 0');  return }
-    if (isNaN(form.height) || form.height <= 0)            { alert('Height must be > 0'); return }
-    if (isNaN(form.quantity) || form.quantity < 1)         { alert('Quantity must be ≥ 1'); return }
+    if (!form.shade_number.trim())                 { alert('Enter Shade Number'); return }
+    if (isNaN(form.width)  || form.width  <= 0)   { alert('Width must be > 0');  return }
+    if (isNaN(form.height) || form.height <= 0)   { alert('Height must be > 0'); return }
+    if (isNaN(form.quantity) || form.quantity < 1) { alert('Quantity must be ≥ 1'); return }
+    if (form.selected_widths.length === 0)         { alert('Select at least one roll width for this piece'); return }
 
-    const widthM   = toM(form.width,                           unit)
-    const heightM  = toM(form.height,                          unit)
-    const valenceM = isNaN(form.valence) ? 0 : toM(form.valence, unit)
+    const widthM   = form.width  * IN_TO_M
+    const heightM  = form.height * IN_TO_M
+    const valenceM = isNaN(form.valence) ? 0 : form.valence * IN_TO_M
+    const finalHeightM = form.blind_type === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
 
-    if (rollWidth && widthM > rollWidth) {
-      alert(
-        `Blind width ${fmt(form.width)}${unitLabel} = ${widthM.toFixed(3)}m exceeds the selected roll width of ${rollWidth}m.\n\n` +
-        `Either reduce the blind width, enable 90° rotation, or choose a wider roll.`
-      )
+    const maxSelected = Math.max(...form.selected_widths)
+    const fitsNormal  = widthM <= maxSelected
+    const fitsRotated = allowRotation && finalHeightM <= maxSelected
+    if (!fitsNormal && !fitsRotated) {
+      if (allowRotation) {
+        alert(
+          `Cannot fit even with 90° rotation.\n\n` +
+          `Normal:  W ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m > ${maxSelected.toFixed(1)}m\n` +
+          `Rotated: H ${(finalHeightM / IN_TO_M).toFixed(5)}" = ${finalHeightM.toFixed(5)}m > ${maxSelected.toFixed(1)}m\n\n` +
+          `Select a wider roll or reduce the piece dimensions.`
+        )
+      } else {
+        alert(
+          `Blind width ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m exceeds all selected roll widths.\n\n` +
+          `Either reduce the blind width, enable 90° rotation, or select a wider roll.`
+        )
+      }
       return
     }
 
     onChange([...items, {
       id: crypto.randomUUID(),
-      shade_number:  form.shade_number,
-      blind_type:    form.blind_type,
-      width:         widthM,
-      height:        heightM,
-      valence:       valenceM,
-      quantity:      form.quantity,
-      material_type: form.material_type,
-      color:         form.color,
-      pattern:       form.pattern,
+      shade_number:   form.shade_number,
+      blind_type:     form.blind_type,
+      width:          widthM,
+      height:         heightM,
+      valence:        valenceM,
+      quantity:       form.quantity,
+      material_type:  form.material_type,
+      color:          form.color,
+      pattern:        form.pattern,
+      selected_widths: form.selected_widths,
     }])
-
-    setForm(f => ({ ...f, shade_number: persistentShade, width: NaN, height: NaN, valence: NaN, quantity: NaN }))
   }
-
-  const removeItem = (id: string) => onChange(items.filter(i => i.id !== id))
 
   const finalHDisplay = (() => {
     if (isNaN(form.height)) return null
-    const hM = toM(form.height, unit)
-    const vM = isNaN(form.valence) ? 0 : toM(form.valence, unit)
-    const finalM = form.blind_type === 'zebra' ? hM * 2 + vM : hM + vM
-    return fromM(finalM, unit)
+    const hM  = form.height * IN_TO_M
+    const vM  = isNaN(form.valence) ? 0 : form.valence * IN_TO_M
+    const fhM = form.blind_type === 'zebra' ? hM * 2 + vM : hM + vM
+    return fhM / IN_TO_M  // back to inches for display
   })()
-
-  const totalPieces = items.reduce((s, i) => s + (i.quantity || 0), 0)
 
   return (
     <div className="panel">
@@ -88,23 +102,7 @@ export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) 
           <Layers size={16} className="text-brand-600" />
           <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Production List</h3>
         </div>
-        <div className="flex items-center gap-3">
-          {/* Unit toggle */}
-          <div className="flex items-center border border-surface-200 rounded-md overflow-hidden text-[11px] font-bold">
-            {(['m', 'cm', 'in'] as Unit[]).map(u => (
-              <button
-                key={u}
-                onClick={() => setUnit(u)}
-                className={`px-2.5 py-1 transition-colors ${
-                  unit === u ? 'bg-brand-600 text-white' : 'text-surface-500 hover:bg-surface-100'
-                }`}
-              >
-                {u}
-              </button>
-            ))}
-          </div>
-          <span className="text-xs font-medium text-surface-400">{items.length} rows · {totalPieces} pcs</span>
-        </div>
+        <span className="text-[11px] font-bold text-surface-400 bg-surface-100 px-2 py-1 rounded-md">inches (″)</span>
       </div>
 
       <div className="panel-body space-y-4">
@@ -133,14 +131,14 @@ export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) 
             </label>
             <input
               value={form.shade_number}
-              onChange={e => { setForm(f => ({ ...f, shade_number: e.target.value })); setPersistentShade(e.target.value) }}
+              onChange={e => setForm(f => ({ ...f, shade_number: e.target.value }))}
               placeholder="BR-001"
               className="w-full"
             />
           </div>
           <div className="col-span-3">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
-              <Ruler size={10} /> W ({unitLabel})
+              <Ruler size={10} /> W (&quot;)
             </label>
             <input
               type="number" step="any" min="0"
@@ -152,7 +150,7 @@ export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) 
           </div>
           <div className="col-span-4">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
-              <ArrowUpDown size={10} /> H ({unitLabel})
+              <ArrowUpDown size={10} /> H (&quot;)
             </label>
             <input
               type="number" step="any" min="0"
@@ -168,13 +166,13 @@ export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) 
         <div className="grid grid-cols-12 gap-3">
           <div className="col-span-3">
             <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
-              Val ({unitLabel})
+              Val (&quot;)
             </label>
             <input
               type="number" step="any" min="0"
               value={isNaN(form.valence) ? '' : form.valence}
               onChange={e => setForm(f => ({ ...f, valence: parseFloat(e.target.value) || NaN }))}
-              placeholder="—"
+              placeholder="6"
               className="w-full text-center placeholder:text-surface-300"
             />
           </div>
@@ -209,71 +207,68 @@ export default function WorkOrderBuilder({ items, onChange, rollWidth }: Props) 
             <div className={`bg-surface-100 border border-surface-200 rounded-lg px-2 py-[9px] text-sm font-mono font-bold text-center ${
               finalHDisplay === null ? 'text-surface-400' : 'text-brand-600'
             }`}>
-              {finalHDisplay === null ? '—' : `${fmt(finalHDisplay)}${unitLabel}`}
+              {finalHDisplay === null ? '—' : `${fmtDim(finalHDisplay)}"`}
             </div>
           </div>
         </div>
 
-        {/* Add Button */}
+        {/* Per-piece roll widths + rotation toggle */}
+        <div className="bg-surface-50 border border-surface-200 rounded-xl p-3 space-y-3">
+          <div>
+            <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-2">
+              Roll Width for This Piece
+            </label>
+            {availableWidths.length === 0 ? (
+              <p className="text-[10px] text-surface-400">No roll widths configured. Go to Settings.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {availableWidths.map(w => {
+                  const selected = form.selected_widths.includes(w)
+                  return (
+                    <button
+                      key={w}
+                      onClick={() => toggleWidth(w)}
+                      className={`py-2 px-3 rounded-lg text-sm font-bold transition-all ${
+                        selected
+                          ? 'bg-brand-600 text-white shadow-sm ring-2 ring-brand-500/30'
+                          : 'bg-white text-surface-500 border border-surface-200 hover:bg-surface-100'
+                      }`}
+                    >
+                      {w.toFixed(1)}m
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            <p className={`text-[10px] mt-1.5 font-medium ${form.selected_widths.length === 0 ? 'text-red-500' : 'text-surface-400'}`}>
+              {form.selected_widths.length === 0
+                ? '⚠ Select at least one roll width for this piece.'
+                : form.selected_widths.length === availableWidths.length
+                  ? 'All widths selected — optimizer picks best for this piece.'
+                  : `${form.selected_widths.map(w => `${w.toFixed(1)}m`).join(', ')} selected.`}
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <RotateCcw size={14} className="text-surface-500" />
+              <span className="text-xs font-semibold text-surface-600">Allow 90° Rotation</span>
+            </div>
+            <button
+              onClick={() => onAllowRotationChange(!allowRotation)}
+              className={`relative w-10 h-5 rounded-full transition-colors ${allowRotation ? 'bg-brand-600' : 'bg-surface-300'}`}
+            >
+              <span className={`absolute top-[2px] left-[2px] w-[17px] h-[17px] bg-white rounded-full shadow transition-transform ${allowRotation ? 'translate-x-5' : ''}`} />
+            </button>
+          </div>
+        </div>
+
         <button
           onClick={addItem}
           className="w-full py-3 border-2 border-dashed border-surface-300 rounded-lg text-surface-400 text-xs font-bold uppercase tracking-wider hover:border-brand-400 hover:text-brand-600 transition-colors flex items-center justify-center gap-2"
         >
           <Plus size={16} /> Add Piece to Order
         </button>
-
-        {/* Items Table — values displayed in current unit, stored in meters */}
-        {items.length > 0 && (
-          <div className="border border-surface-200 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-surface-50">
-                <tr>
-                  <th className="px-3 py-2.5 text-left   text-[10px] font-bold text-surface-400 uppercase tracking-wider">Type</th>
-                  <th className="px-3 py-2.5 text-left   text-[10px] font-bold text-surface-400 uppercase tracking-wider">Shade #</th>
-                  <th className="px-3 py-2.5 text-right  text-[10px] font-bold text-surface-400 uppercase tracking-wider">W×H ({unitLabel})</th>
-                  <th className="px-3 py-2.5 text-center text-[10px] font-bold text-surface-400 uppercase tracking-wider">Val</th>
-                  <th className="px-3 py-2.5 text-center text-[10px] font-bold text-surface-400 uppercase tracking-wider">Qty</th>
-                  <th className="px-3 py-2.5 text-right  text-[10px] font-bold text-surface-400 uppercase tracking-wider">Final H</th>
-                  <th className="px-3 py-2.5 text-center text-[10px] font-bold text-surface-400 uppercase tracking-wider w-10"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-surface-100">
-                {items.map(item => {
-                  const w  = fromM(item.width, unit)
-                  const h  = fromM(item.height, unit)
-                  const v  = fromM(item.valence, unit)
-                  const fhM = item.blind_type === 'zebra'
-                    ? item.height * 2 + item.valence
-                    : item.height + item.valence
-                  const fh = fromM(fhM, unit)
-                  const oversized = rollWidth ? item.width > rollWidth : false
-                  return (
-                    <tr key={item.id} className={`transition-colors ${oversized ? 'bg-red-50' : 'hover:bg-surface-50/80'}`}>
-                      <td className="px-3 py-2.5">
-                        <span className={`badge ${item.blind_type === 'zebra' ? 'bg-purple-50 text-purple-700 border border-purple-200' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
-                          {item.blind_type}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5 font-semibold text-surface-700">{item.shade_number}</td>
-                      <td className={`px-3 py-2.5 text-right font-mono ${oversized ? 'text-red-600 font-bold' : 'text-surface-600'}`}>
-                        {fmt(w)} × {fmt(h)}
-                        {oversized && <span className="ml-1 text-[10px]">⚠</span>}
-                      </td>
-                      <td className="px-3 py-2.5 text-center text-surface-500">+{fmt(v)}</td>
-                      <td className="px-3 py-2.5 text-center font-bold">{item.quantity}</td>
-                      <td className="px-3 py-2.5 text-right font-mono font-semibold text-brand-600">{fmt(fh)}{unitLabel}</td>
-                      <td className="px-3 py-2.5 text-center">
-                        <button onClick={() => removeItem(item.id)} className="text-surface-400 hover:text-red-500 transition-colors p-1 hover:bg-red-50 rounded">
-                          <Trash2 size={14} />
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
     </div>
   )

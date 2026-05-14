@@ -125,6 +125,25 @@ const initDB = async () => {
     )
   `);
 
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS settings (
+      \`key\` VARCHAR(100) NOT NULL PRIMARY KEY,
+      \`value\` TEXT NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+
+  const defaultSettings = [
+    ['roll_widths', JSON.stringify([2.0, 2.5, 2.8, 2.9, 3.0])],
+    ['max_roll_length', '30'],
+  ];
+  for (const [key, value] of defaultSettings) {
+    await connection.query(
+      'INSERT IGNORE INTO settings (`key`, `value`) VALUES (?, ?)',
+      [key, value]
+    );
+  }
+
   console.log('Database initialized successfully');
   await connection.end();
 };

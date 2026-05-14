@@ -17,3 +17,16 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# AI assistant context files
+claude.md
+CLAUDE.md
+
+# PM2 process config (contains server paths / env)
+ecosystem.config.js
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Claude Code project files
+.claude/

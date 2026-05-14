@@ -6,8 +6,6 @@ const MIN_REUSABLE_LENGTH = 0.5;
 const DEFAULT_ROLL_LENGTH = 30;
 
 // Maximal Rectangles (MAXRECTS) — best practical 2D bin packing algorithm.
-// Maintains a set of maximal free rectangles; each placement splits intersecting
-// rects into up to 4 sub-rects and prunes any that are now contained by another.
 class MaxRects {
   constructor(width, height) {
     this.binWidth = width;
@@ -49,10 +47,10 @@ class MaxRects {
     const dx = fr.width - w;
     const dy = fr.height - h;
     switch (heuristic) {
-      case 'BSSF': return [Math.min(dx, dy), Math.max(dx, dy)]; // Best Short Side Fit
-      case 'BLSF': return [Math.max(dx, dy), Math.min(dx, dy)]; // Best Long Side Fit
-      case 'BAF':  return [fr.width * fr.height - w * h, Math.min(dx, dy)]; // Best Area Fit
-      case 'BL':   return [fr.y, fr.x]; // Bottom-Left
+      case 'BSSF': return [Math.min(dx, dy), Math.max(dx, dy)];
+      case 'BLSF': return [Math.max(dx, dy), Math.min(dx, dy)];
+      case 'BAF':  return [fr.width * fr.height - w * h, Math.min(dx, dy)];
+      case 'BL':   return [fr.y, fr.x];
       default:     return [Math.min(dx, dy), Math.max(dx, dy)];
     }
   }
@@ -64,7 +62,6 @@ class MaxRects {
         newFree.push(fr);
         continue;
       }
-      // Split fr around placed into up to 4 axis-aligned sub-rectangles
       if (placed.x > fr.x)
         newFree.push({ x: fr.x, y: fr.y, width: placed.x - fr.x, height: fr.height });
       if (placed.x + placed.width < fr.x + fr.width)
@@ -74,7 +71,6 @@ class MaxRects {
       if (placed.y + placed.height < fr.y + fr.height)
         newFree.push({ x: fr.x, y: placed.y + placed.height, width: fr.width, height: fr.y + fr.height - placed.y - placed.height });
     }
-    // Prune non-maximal rectangles (those fully contained within another)
     this.freeRects = newFree.filter((r, i) =>
       r.width > 0 && r.height > 0 &&
       !newFree.some((o, j) => i !== j && this._contains(o, r))
@@ -108,27 +104,22 @@ class Optimizer {
   }
 
   async optimizeWorkOrder(payload) {
-    const { work_order_number, client_name, roll_width, items, allow_rotation } = payload;
+    const {
+      work_order_number, client_name, items,
+      allow_rotation, max_roll_length
+    } = payload;
 
+    const rollLength = parseFloat(max_roll_length) > 0 ? parseFloat(max_roll_length) : DEFAULT_ROLL_LENGTH;
     if (!items || items.length === 0) throw new Error('No items in work order');
-    if (!roll_width || roll_width <= 0) throw new Error('Invalid roll width');
 
+    // Validate all items heights fit
     for (const item of items) {
-      const w = parseFloat(item.width);
       const h = parseFloat(item.height);
       const v = parseFloat(item.valence || 0);
       const finalH = item.blind_type === 'zebra' ? h * 2 + v : h + v;
-      if (w > roll_width) {
+      if (finalH > rollLength) {
         throw new Error(
-          `Blind "${item.shade_number}" width ${w.toFixed(3)}m exceeds the selected roll width ${roll_width}m. ` +
-          `Check your units — did you mean centimetres?`
-        );
-      }
-      if (finalH > DEFAULT_ROLL_LENGTH) {
-        throw new Error(
-          `Blind "${item.shade_number}" has final height ${finalH.toFixed(3)}m (height ${h.toFixed(3)} + valence ${v.toFixed(3)}) ` +
-          `which exceeds the maximum roll length of ${DEFAULT_ROLL_LENGTH}m. ` +
-          `Check your units — did you mean centimetres?`
+          `Blind "${item.shade_number}" final height ${finalH.toFixed(3)}m exceeds max roll length ${rollLength}m.`
         );
       }
     }
@@ -136,180 +127,214 @@ class Optimizer {
     const materialType = items[0].material_type;
     const color = items[0].color;
     const pattern = items[0].pattern || null;
-
     for (const item of items) {
       if (item.material_type !== materialType || item.color !== color || (item.pattern || null) !== pattern) {
         throw new Error('All items must have the same material, color, and pattern');
       }
     }
 
+    // Create job
     const job = await Job.create({
       work_order_number: work_order_number || null,
       client_name: client_name || null,
       allow_rotation: allow_rotation || false
     });
-
     let totalPieces = 0;
     for (const item of items) {
       await JobItem.create({ ...item, job_id: job.id });
       totalPieces += parseInt(item.quantity) || 1;
     }
 
-    this.blindQueue = [];
+    // Group items by their selected_widths (each unique set is a separate packing run)
+    const groupMap = new Map();
     for (const item of items) {
-      const qty = parseInt(item.quantity) || 1;
-      const finalHeight = item.blind_type === 'zebra'
-        ? (parseFloat(item.height) * 2) + parseFloat(item.valence || 0)
-        : parseFloat(item.height) + parseFloat(item.valence || 0);
-
-      for (let i = 0; i < qty; i++) {
-        this.blindQueue.push({
-          id: `${item.shade_number || 'item'}_${i}`,
-          shade_number: item.shade_number || '',
-          blind_type: item.blind_type,
-          width: parseFloat(item.width),
-          height: parseFloat(item.height),
-          final_height: finalHeight,
-          piece_index: i,
-          material_type: materialType,
-          color,
-          pattern
-        });
-      }
+      const sw = Array.isArray(item.selected_widths) && item.selected_widths.length > 0
+        ? item.selected_widths.map(Number).sort((a, b) => a - b)
+        : STANDARD_ROLL_WIDTHS.slice().sort((a, b) => a - b);
+      const key = JSON.stringify(sw);
+      if (!groupMap.has(key)) groupMap.set(key, { widths: sw, items: [] });
+      groupMap.get(key).items.push(item);
     }
 
     this.results = [];
     this.usedLeftovers = [];
     let sheetCounter = 0;
+    let primaryRollWidth = null;
+    const allSuggestions = [];
 
-    // PHASE 1: Reuse leftovers first (largest area first)
-    const leftovers = await Leftover.findByMaterialSignature(materialType, color, pattern);
-    const sortedLeftovers = [...leftovers].sort((a, b) => (b.width * b.length) - (a.width * a.length));
+    const safeParse = (val) => {
+      if (!val) return [];
+      if (typeof val === 'object') return val;
+      try { return JSON.parse(val); } catch { return []; }
+    };
 
-    for (const leftover of sortedLeftovers) {
-      if (this.blindQueue.length === 0) break;
-      if (parseFloat(leftover.width) < roll_width * 0.8) continue;
+    for (const [, group] of groupMap) {
+      // Pick best roll width for this group
+      const sug = this.suggestRollWidths(group.items, group.widths, rollLength, allow_rotation || false);
+      if (sug.length === 0) {
+        const names = group.items.map(i => `"${i.shade_number}"`).join(', ');
+        throw new Error(
+          `No roll width can fit the pieces: ${names}. Check piece widths vs selected roll widths.`
+        );
+      }
+      const effectiveRollWidth = sug[0].width;
+      if (!primaryRollWidth) primaryRollWidth = effectiveRollWidth;
+      for (const s of sug) {
+        if (!allSuggestions.some(e => e.width === s.width)) allSuggestions.push(s);
+      }
 
-      const { placed, freeRects } = this.packSheet({
-        width: parseFloat(leftover.width),
-        length: parseFloat(leftover.length),
-        allow_rotation: allow_rotation || false
-      });
-
-      if (placed.length > 0) {
-        sheetCounter++;
-        this.usedLeftovers.push(leftover.id);
-
-        const usedLength = Math.max(...placed.map(p => p.y + p.height));
-        const remainingLength = parseFloat(leftover.length) - usedLength;
-
-        if (remainingLength < 0.1) {
-          await Leftover.markUsed(leftover.id);
-        } else {
-          await Leftover.updateDimensions(leftover.id, parseFloat(leftover.width), remainingLength);
+      // Validate widths fit
+      for (const item of group.items) {
+        const w = parseFloat(item.width);
+        if (w > effectiveRollWidth) {
+          throw new Error(
+            `Blind "${item.shade_number}" width ${w.toFixed(5)}m exceeds roll width ${effectiveRollWidth}m. ` +
+            `Select a wider roll or reduce the piece width.`
+          );
         }
+      }
 
-        let previousBlinds = [];
-        let originalWidth = parseFloat(leftover.width);
-        let originalLength = parseFloat(leftover.length);
-        let leftoverOffsetX = 0;
-        let leftoverOffsetY = 0;
+      // Build blind queue for this group
+      this.blindQueue = [];
+      for (const item of group.items) {
+        const qty = parseInt(item.quantity) || 1;
+        const valence = parseFloat(item.valence || 0);
+        const finalHeight = item.blind_type === 'zebra'
+          ? (parseFloat(item.height) * 2) + valence
+          : parseFloat(item.height) + valence;
+        for (let i = 0; i < qty; i++) {
+          this.blindQueue.push({
+            id: `${item.shade_number || 'item'}_${i}`,
+            shade_number: item.shade_number || '',
+            blind_type: item.blind_type,
+            width: parseFloat(item.width),
+            height: parseFloat(item.height),
+            valence,
+            final_height: finalHeight,
+            piece_index: i,
+            material_type: materialType,
+            color,
+            pattern
+          });
+        }
+      }
 
-        if (leftover.source_job_id) {
-          const prevResults = await OptimizationResult.findByJob(leftover.source_job_id);
-          const safeParse = (val) => {
-            if (!val) return [];
-            if (typeof val === 'object') return val;
-            try { return JSON.parse(val); } catch { return []; }
-          };
+      // PHASE 1: Reuse leftovers first
+      const leftovers = await Leftover.findByMaterialSignature(materialType, color, pattern);
+      const sortedLeftovers = [...leftovers].sort((a, b) => (b.width * b.length) - (a.width * a.length));
 
-          for (const pr of prevResults) {
-            const prevWaste = safeParse(pr.reusable_leftovers);
-            const prevBlinds = safeParse(pr.blinds_placed);
+      for (const leftover of sortedLeftovers) {
+        if (this.blindQueue.length === 0) break;
+        if (parseFloat(leftover.width) < effectiveRollWidth * 0.8) continue;
 
-            const matched = prevWaste.find(wl =>
-              Math.abs(parseFloat(wl.width) - parseFloat(leftover.width)) < 0.01 &&
-              Math.abs(parseFloat(wl.height) - parseFloat(leftover.length)) < 0.01
-            );
+        const { placed, freeRects } = this.packSheet({
+          width: parseFloat(leftover.width),
+          length: parseFloat(leftover.length),
+          allow_rotation: allow_rotation || false
+        });
 
-            if (matched) {
-              originalWidth = parseFloat(pr.roll_width);
-              originalLength = parseFloat(pr.roll_length_used);
-              leftoverOffsetX = parseFloat(matched.x);
-              leftoverOffsetY = parseFloat(matched.y);
-              previousBlinds = prevBlinds;
-              break;
-            }
+        if (placed.length > 0) {
+          sheetCounter++;
+          this.usedLeftovers.push(leftover.id);
+          const usedLength = Math.max(...placed.map(p => p.y + p.height));
+          const remainingLength = parseFloat(leftover.length) - usedLength;
 
-            if (Math.abs(parseFloat(pr.roll_width) - parseFloat(leftover.width)) < 0.01) {
-              const prevUsedLength = parseFloat(pr.roll_length_used);
-              const tailLength = DEFAULT_ROLL_LENGTH - prevUsedLength;
-              if (Math.abs(tailLength - parseFloat(leftover.length)) < 0.1) {
+          if (remainingLength < 0.1) {
+            await Leftover.markUsed(leftover.id);
+          } else {
+            await Leftover.updateDimensions(leftover.id, parseFloat(leftover.width), remainingLength);
+          }
+
+          let previousBlinds = [];
+          let originalWidth = parseFloat(leftover.width);
+          let originalLength = parseFloat(leftover.length);
+          let leftoverOffsetX = 0;
+          let leftoverOffsetY = 0;
+
+          if (leftover.source_job_id) {
+            const prevResults = await OptimizationResult.findByJob(leftover.source_job_id);
+            for (const pr of prevResults) {
+              const prevWaste = safeParse(pr.reusable_leftovers);
+              const prevBlinds = safeParse(pr.blinds_placed);
+              const matched = prevWaste.find(wl =>
+                Math.abs(parseFloat(wl.width) - parseFloat(leftover.width)) < 0.01 &&
+                Math.abs(parseFloat(wl.height) - parseFloat(leftover.length)) < 0.01
+              );
+              if (matched) {
                 originalWidth = parseFloat(pr.roll_width);
-                originalLength = DEFAULT_ROLL_LENGTH;
-                leftoverOffsetX = 0;
-                leftoverOffsetY = prevUsedLength;
+                originalLength = parseFloat(pr.roll_length_used);
+                leftoverOffsetX = parseFloat(matched.x);
+                leftoverOffsetY = parseFloat(matched.y);
                 previousBlinds = prevBlinds;
                 break;
               }
+              if (Math.abs(parseFloat(pr.roll_width) - parseFloat(leftover.width)) < 0.01) {
+                const prevUsedLength = parseFloat(pr.roll_length_used);
+                const tailLength = rollLength - prevUsedLength;
+                if (Math.abs(tailLength - parseFloat(leftover.length)) < 0.1) {
+                  originalWidth = parseFloat(pr.roll_width);
+                  originalLength = rollLength;
+                  leftoverOffsetX = 0;
+                  leftoverOffsetY = prevUsedLength;
+                  previousBlinds = prevBlinds;
+                  break;
+                }
+              }
             }
           }
+
+          await this.saveSheetResult(
+            job.id, sheetCounter, 'leftover',
+            parseFloat(leftover.width), usedLength, placed, freeRects,
+            previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
+          );
+        }
+      }
+
+      // PHASE 2: Fresh rolls
+      while (this.blindQueue.length > 0) {
+        sheetCounter++;
+        const { placed, freeRects } = this.packSheet({
+          width: effectiveRollWidth,
+          length: rollLength,
+          allow_rotation: allow_rotation || false
+        });
+
+        if (placed.length === 0) {
+          const b = this.blindQueue[0];
+          throw new Error(
+            `Cannot place blind "${b.shade_number}" (${b.width.toFixed(5)}m × ${b.final_height.toFixed(5)}m) ` +
+            `on a ${effectiveRollWidth}m × ${rollLength}m roll. Check dimensions and units.`
+          );
+        }
+
+        const usedLength = Math.max(...placed.map(p => p.y + p.height));
+        const remainingLength = rollLength - usedLength;
+        if (remainingLength >= MIN_REUSABLE_LENGTH && effectiveRollWidth >= MIN_REUSABLE_WIDTH) {
+          await Leftover.create({
+            width: effectiveRollWidth,
+            length: remainingLength,
+            material_type: materialType,
+            color,
+            pattern,
+            source_job_id: job.id
+          });
         }
 
         await this.saveSheetResult(
-          job.id, sheetCounter, 'leftover',
-          parseFloat(leftover.width), usedLength, placed, freeRects,
-          previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
+          job.id, sheetCounter, 'fresh_roll',
+          effectiveRollWidth, usedLength, placed, freeRects,
+          [], effectiveRollWidth, usedLength, 0, 0
         );
       }
-    }
-
-    // PHASE 2: Fresh rolls
-    while (this.blindQueue.length > 0) {
-      sheetCounter++;
-
-      const { placed, freeRects } = this.packSheet({
-        width: parseFloat(roll_width),
-        length: DEFAULT_ROLL_LENGTH,
-        allow_rotation: allow_rotation || false
-      });
-
-      if (placed.length === 0) {
-        const b = this.blindQueue[0];
-        throw new Error(
-          `Cannot place blind "${b.shade_number}" (${b.width.toFixed(3)}m wide × ${b.final_height.toFixed(3)}m tall) ` +
-          `on a ${roll_width}m × ${DEFAULT_ROLL_LENGTH}m roll. Check dimensions and units.`
-        );
-      }
-
-      const usedLength = Math.max(...placed.map(p => p.y + p.height));
-
-      const remainingLength = DEFAULT_ROLL_LENGTH - usedLength;
-      if (remainingLength >= MIN_REUSABLE_LENGTH && roll_width >= MIN_REUSABLE_WIDTH) {
-        await Leftover.create({
-          width: roll_width,
-          length: remainingLength,
-          material_type: materialType,
-          color,
-          pattern,
-          source_job_id: job.id
-        });
-      }
-
-      await this.saveSheetResult(
-        job.id, sheetCounter, 'fresh_roll',
-        roll_width, usedLength, placed, freeRects,
-        [], roll_width, usedLength, 0, 0
-      );
     }
 
     const stats = this.calculateJobStats();
-
     await Job.update(job.id, {
       status: 'optimized',
       total_pieces: totalPieces,
       total_sheets: this.results.length,
-      roll_width_used: roll_width,
+      roll_width_used: primaryRollWidth,
       total_waste_percent: stats.wastePercent,
       total_utilization_percent: stats.utilizationPercent
     });
@@ -318,25 +343,26 @@ class Optimizer {
       job_id: job.id,
       work_order_number,
       client_name,
-      roll_width,
+      roll_width: primaryRollWidth,
+      max_roll_length: rollLength,
       total_pieces: totalPieces,
       total_sheets: this.results.length,
       total_leftovers_used: this.usedLeftovers.length,
       waste_percent: stats.wastePercent,
       utilization_percent: stats.utilizationPercent,
+      roll_width_suggestions: allSuggestions.sort((a, b) => b.utilization - a.utilization),
       sheets: this.results
     };
   }
 
-  // Runs all 16 strategy combinations (4 heuristics × 4 sort orders) and returns
-  // the placement that maximises pieces fitted, then minimises material used.
+  // Runs all 16 strategy combinations and returns best placement.
   packSheet({ width, length, allow_rotation }) {
     const HEURISTICS = ['BSSF', 'BLSF', 'BAF', 'BL'];
     const SORT_FNS = [
-      (a, b) => (b.width * b.final_height) - (a.width * a.final_height), // area desc
-      (a, b) => b.final_height - a.final_height,                          // height desc
-      (a, b) => b.width - a.width,                                         // width desc
-      (a, b) => (b.width + b.final_height) - (a.width + a.final_height),  // perimeter desc
+      (a, b) => (b.width * b.final_height) - (a.width * a.final_height),
+      (a, b) => b.final_height - a.final_height,
+      (a, b) => b.width - a.width,
+      (a, b) => (b.width + b.final_height) - (a.width + a.final_height),
     ];
 
     let bestPlaced = [];
@@ -386,6 +412,70 @@ class Optimizer {
     return { placed: bestPlaced, freeRects: bestFreeRects };
   }
 
+  // Pure simulation — no DB writes. Returns utilization for a given roll width.
+  simulatePacking(items, width, rollLength, allowRotation) {
+    const queue = [];
+    for (const item of items) {
+      const qty = parseInt(item.quantity) || 1;
+      const valence = parseFloat(item.valence || 0);
+      const finalHeight = item.blind_type === 'zebra'
+        ? (parseFloat(item.height) * 2) + valence
+        : parseFloat(item.height) + valence;
+      for (let i = 0; i < qty; i++) {
+        queue.push({
+          id: `sim_${item.shade_number || 'item'}_${i}`,
+          width: parseFloat(item.width),
+          final_height: finalHeight,
+          piece_index: i
+        });
+      }
+    }
+
+    const savedQueue = this.blindQueue;
+    this.blindQueue = queue;
+
+    let totalBlindArea = 0;
+    let totalSheetArea = 0;
+    let sheets = 0;
+    let allFit = true;
+
+    while (this.blindQueue.length > 0) {
+      const { placed } = this.packSheet({ width, length: rollLength, allow_rotation: allowRotation });
+      if (placed.length === 0) { allFit = false; break; }
+      const usedLength = Math.max(...placed.map(p => p.y + p.height));
+      totalBlindArea += placed.reduce((sum, p) => sum + p.width * p.height, 0);
+      totalSheetArea += width * usedLength;
+      sheets++;
+    }
+
+    this.blindQueue = savedQueue;
+
+    const utilization = totalSheetArea > 0 ? (totalBlindArea / totalSheetArea) * 100 : 0;
+    return { width, utilization: parseFloat(utilization.toFixed(2)), sheets, all_fit: allFit };
+  }
+
+  // Runs simulation for all available widths and returns sorted suggestions.
+  suggestRollWidths(items, availableWidths, rollLength, allowRotation) {
+    const results = [];
+    for (const w of availableWidths) {
+      let allFit = true;
+      for (const item of items) {
+        const iw = parseFloat(item.width);
+        const valence = parseFloat(item.valence || 0);
+        const finalH = item.blind_type === 'zebra'
+          ? (parseFloat(item.height) * 2) + valence
+          : parseFloat(item.height) + valence;
+        const fitsNormal  = iw <= w && finalH <= rollLength;
+        const fitsRotated = allowRotation && finalH <= w && iw <= rollLength;
+        if (!fitsNormal && !fitsRotated) { allFit = false; break; }
+      }
+      if (!allFit) continue;
+      const sim = this.simulatePacking(items, w, rollLength, allowRotation);
+      if (sim.all_fit) results.push(sim);
+    }
+    return results.sort((a, b) => b.utilization - a.utilization);
+  }
+
   async saveSheetResult(
     jobId, sheetNumber, sheetType, rollWidth, usedLength, placed, freeRects,
     previousBlinds = [], originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
@@ -395,8 +485,6 @@ class Optimizer {
     const utilization = totalSheetArea > 0 ? (blindArea / totalSheetArea) * 100 : 0;
     const wastePercent = 100 - utilization;
 
-    // Derive waste areas directly from MAXRECTS free rectangles, clipped to usedLength.
-    // Free rects above usedLength belong to the tail leftover handled separately.
     const wasteAreas = [];
     const reusableLeftovers = [];
 
@@ -436,8 +524,10 @@ class Optimizer {
         y: p.y,
         width: p.width,
         height: p.height,
+        original_height: p.height_orig !== undefined ? p.height_orig : null,
+        valence: p.valence || 0,
         blind_type: p.blind_type,
-        rotated: p.rotated || false
+        rotated: p.rotated || false,
       })),
       waste_areas: wasteAreas,
       reusable_leftovers: reusableLeftovers,
@@ -450,7 +540,11 @@ class Optimizer {
       sheet_type: sheetType,
       width: rollWidth,
       length: usedLength,
-      blinds: placed,
+      blinds: placed.map(p => ({
+        ...p,
+        valence: p.valence || 0,
+        original_height: p.height,
+      })),
       waste_areas: wasteAreas,
       reusable_leftovers: reusableLeftovers,
       previous_blinds: previousBlinds,

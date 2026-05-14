@@ -2,10 +2,11 @@
 
 import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
-import { Scissors, Eye, EyeOff, Loader2, AlertCircle, Lock, User } from 'lucide-react'
+import { Scissors, Eye, EyeOff, Loader2, AlertCircle, Lock, User, CheckCircle2 } from 'lucide-react'
 import { setToken } from '@/lib/auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
+const YEAR = new Date().getFullYear()
 
 export default function LoginPage() {
   const router = useRouter()
@@ -37,46 +38,110 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-brand-900 via-brand-700 to-brand-600 flex items-center justify-center p-4">
-      {/* Background pattern */}
-      <div className="absolute inset-0 opacity-5" style={{
-        backgroundImage: 'repeating-linear-gradient(45deg, white 0, white 1px, transparent 0, transparent 50%)',
-        backgroundSize: '20px 20px'
-      }} />
+    <div className="min-h-screen flex">
 
-      <div className="relative w-full max-w-md">
-        {/* Logo card */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-white/15 backdrop-blur rounded-2xl mb-4 shadow-xl">
-            <Scissors size={30} className="text-white" />
+      {/* ── LEFT PANEL ── */}
+      <div className="hidden lg:flex lg:w-[55%] relative flex-col bg-[#0c1120] overflow-hidden">
+
+        {/* Background grid */}
+        <div className="absolute inset-0 opacity-[0.04]" style={{
+          backgroundImage: `linear-gradient(white 1px, transparent 1px), linear-gradient(90deg, white 1px, transparent 1px)`,
+          backgroundSize: '56px 56px'
+        }} />
+
+        {/* Glows */}
+        <div className="absolute top-0 right-0 w-[500px] h-[500px] rounded-full"
+          style={{ background: 'radial-gradient(circle, rgba(79,70,229,0.18) 0%, transparent 70%)' }} />
+        <div className="absolute bottom-0 left-0 w-[400px] h-[400px] rounded-full"
+          style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%)' }} />
+
+        <div className="relative z-10 flex flex-col h-full px-14 py-12">
+
+          {/* Logo */}
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
+              <Scissors size={20} className="text-white" />
+            </div>
+            <span className="text-xl font-black text-white tracking-tight">OptiRoll</span>
           </div>
-          <h1 className="text-3xl font-black text-white tracking-tight">OptiRoll</h1>
-          <p className="text-brand-200 text-sm mt-1 font-medium tracking-wider uppercase">
-            Cutting Optimization System
+
+          {/* Centre content */}
+          <div className="flex flex-col justify-center flex-1 py-12">
+            {/* Eyebrow */}
+            <span className="text-indigo-400 text-xs font-bold uppercase tracking-[0.18em] mb-5">
+              Blinds Manufacturing
+            </span>
+
+            {/* Headline */}
+            <h1 className="text-[3.25rem] font-black text-white leading-[1.08] tracking-tight mb-6">
+              Cut smarter.<br />
+              <span className="text-transparent bg-clip-text"
+                style={{ backgroundImage: 'linear-gradient(90deg, #818cf8, #a5b4fc)' }}>
+                Waste less.
+              </span>
+            </h1>
+
+            <p className="text-slate-400 text-[15px] leading-relaxed max-w-[340px] mb-10">
+              Plan every cut, reuse every offcut, and print A3-ready layouts — all in one place.
+            </p>
+
+            {/* Features */}
+            <div className="space-y-3.5">
+              {[
+                'Smart cut layout for every order',
+                'Per-piece roll width selection',
+                'Automatic offcut reuse across jobs',
+                'A3 print-ready cutting maps',
+              ].map((text, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <CheckCircle2 size={17} className="text-indigo-400 shrink-0" />
+                  <span className="text-[14px] text-slate-300 font-medium">{text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Footer */}
+          <p className="text-slate-600 text-xs">
+            © {YEAR} OptiRoll · v1.1.0
           </p>
         </div>
+      </div>
 
-        {/* Login card */}
-        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
-          <div className="bg-surface-50 border-b border-surface-200 px-8 py-5">
-            <h2 className="text-lg font-bold text-surface-800">Sign in to your account</h2>
-            <p className="text-sm text-surface-400 mt-0.5">Enter your credentials to continue</p>
+      {/* ── RIGHT PANEL ── */}
+      <div className="flex-1 flex flex-col items-center justify-center bg-white px-6 py-12">
+
+        {/* Mobile logo */}
+        <div className="lg:hidden flex items-center gap-2 mb-10">
+          <div className="w-9 h-9 bg-indigo-600 rounded-xl flex items-center justify-center">
+            <Scissors size={18} className="text-white" />
+          </div>
+          <span className="text-lg font-black text-gray-900">OptiRoll</span>
+        </div>
+
+        <div className="w-full max-w-[340px]">
+          <div className="mb-8">
+            <h2 className="text-[1.6rem] font-black text-gray-900 tracking-tight leading-tight">
+              Welcome back
+            </h2>
+            <p className="text-sm text-gray-400 mt-1.5">Sign in to your account to continue</p>
           </div>
 
-          <form onSubmit={handleSubmit} className="px-8 py-6 space-y-5">
-            {error && (
-              <div className="flex items-center gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3">
-                <AlertCircle size={16} className="shrink-0" />
-                <span className="text-sm font-medium">{error}</span>
-              </div>
-            )}
+          {error && (
+            <div className="flex items-center gap-2.5 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 mb-5">
+              <AlertCircle size={15} className="shrink-0" />
+              <span className="text-sm font-medium">{error}</span>
+            </div>
+          )}
 
-            <div className="space-y-1.5">
-              <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Username */}
+            <div>
+              <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">
                 Username
               </label>
               <div className="relative">
-                <User size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400" />
+                <User size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type="text"
                   value={username}
@@ -84,31 +149,32 @@ export default function LoginPage() {
                   placeholder="admin"
                   autoComplete="username"
                   autoFocus
-                  className="w-full pl-10"
+                  className="w-full pl-10 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-800 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
                 />
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider">
+            {/* Password */}
+            <div>
+              <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">
                 Password
               </label>
               <div className="relative">
-                <Lock size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400" />
+                <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
                 <input
                   type={showPw ? 'text' : 'password'}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   placeholder="••••••••"
                   autoComplete="current-password"
-                  className="w-full pl-10 pr-10"
+                  className="w-full pl-10 pr-11 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm text-gray-800 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPw(!showPw)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-surface-400 hover:text-surface-600 transition-colors"
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
                 >
-                  {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
+                  {showPw ? <EyeOff size={14} /> : <Eye size={14} />}
                 </button>
               </div>
             </div>
@@ -116,23 +182,21 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="btn-brand w-full py-3 text-sm font-bold uppercase tracking-wider disabled:opacity-60 disabled:cursor-not-allowed mt-2"
+              className="w-full py-3 mt-1 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white text-sm font-bold tracking-wide transition-colors flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              {loading ? (
-                <><Loader2 size={16} className="animate-spin" /> Signing in…</>
-              ) : (
-                'Sign In'
-              )}
+              {loading
+                ? <><Loader2 size={16} className="animate-spin" /> Signing in…</>
+                : 'Sign In'
+              }
             </button>
           </form>
 
-          <div className="bg-surface-50 border-t border-surface-200 px-8 py-4">
-            <p className="text-xs text-surface-400 text-center">
-              OptiRoll v1.0.0 · Blinds Manufacturing Optimization
-            </p>
-          </div>
+          <p className="text-center text-[11px] text-gray-400 mt-8">
+            © {YEAR} OptiRoll · Blinds Manufacturing
+          </p>
         </div>
       </div>
+
     </div>
   )
 }
