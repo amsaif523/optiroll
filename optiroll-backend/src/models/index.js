@@ -225,11 +225,16 @@ const JobItem = {
     } else {
       final_height = parseFloat(data.height) + parseFloat(data.valence || 0);
     }
-    const sql = `INSERT INTO job_items (job_id, shade_number, blind_type, width, height, valence, final_height, quantity, material_type, color, pattern) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const selectedWidths = Array.isArray(data.selected_widths) && data.selected_widths.length > 0
+      ? JSON.stringify(data.selected_widths)
+      : null;
+    const grainLocked = data.grain_locked === true || data.grain_locked === 1 ? 1 : 0;
+    const sql = `INSERT INTO job_items (job_id, shade_number, blind_type, width, height, valence, final_height, quantity, material_type, color, pattern, selected_widths, grain_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await pool.execute(sql, [
       data.job_id, data.shade_number || null, data.blind_type, data.width, data.height,
       data.valence || 0, final_height, data.quantity || 1,
-      data.material_type, data.color, data.pattern || null
+      data.material_type, data.color, data.pattern || null,
+      selectedWidths, grainLocked
     ]);
     return { id: result.insertId, ...data, final_height };
   },

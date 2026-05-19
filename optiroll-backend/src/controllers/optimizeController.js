@@ -19,10 +19,24 @@ exports.run = async (req, res, next) => {
     const leftover_threshold = req.body.leftover_threshold
       ?? (leftoverSetting ? parseFloat(leftoverSetting) : 0.8);
 
+    // Load configured roll widths so optimizer's fallback respects Settings additions.
+    // (Frontend always sends per-item selected_widths; this only kicks in for direct API calls.)
+    const widthsSetting = await Setting.get('roll_widths');
+    let default_widths;
+    try {
+      const parsed = typeof widthsSetting === 'string' ? JSON.parse(widthsSetting) : widthsSetting;
+      default_widths = Array.isArray(parsed)
+        ? parsed.map(Number).filter(v => Number.isFinite(v) && v > 0)
+        : null;
+    } catch {
+      default_widths = null;
+    }
+
     const result = await optimizer.optimizeWorkOrder({
       ...req.body,
       max_roll_length,
-      leftover_threshold
+      leftover_threshold,
+      default_widths
     });
     await ActivityLog.create({
       user_id: req.user?.id,

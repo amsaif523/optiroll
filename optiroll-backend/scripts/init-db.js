@@ -102,10 +102,25 @@ const initDB = async () => {
       material_type VARCHAR(50) NOT NULL,
       color VARCHAR(50) NOT NULL,
       pattern VARCHAR(50),
+      selected_widths JSON NULL,
+      grain_locked TINYINT(1) NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_job (job_id)
     )
   `);
+
+  // Idempotent migrations: add columns if they were missing on older installs.
+  // MySQL throws ER_DUP_FIELDNAME (1060) if the column already exists — safe to ignore.
+  const addColumnIfMissing = async (table, column, definition) => {
+    try {
+      await connection.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      console.log(`Added column ${table}.${column}`);
+    } catch (err) {
+      if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+    }
+  };
+  await addColumnIfMissing('job_items', 'selected_widths', 'JSON NULL AFTER pattern');
+  await addColumnIfMissing('job_items', 'grain_locked', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER selected_widths');
 
   await connection.query(`
     CREATE TABLE IF NOT EXISTS optimization_results (

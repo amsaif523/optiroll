@@ -194,12 +194,18 @@ class Optimizer {
       allow_rotation, max_roll_length,
       cut_mode: rawCutMode,
       leftover_threshold: rawLeftoverThreshold,
-      mode: rawMode
+      mode: rawMode,
+      default_widths: rawDefaultWidths
     } = payload;
 
     const cutMode = rawCutMode === 'guillotine' ? 'guillotine' : DEFAULT_CUT_MODE;
     const mode = rawMode === 'deep' ? 'deep' : 'quick';
     const allowRotation = allow_rotation || false;
+    // Fallback widths used only when an item has no selected_widths.
+    // Prefer settings-driven list (live), then the hardcoded constant.
+    const defaultWidths = Array.isArray(rawDefaultWidths) && rawDefaultWidths.length > 0
+      ? rawDefaultWidths.map(Number).filter(v => Number.isFinite(v) && v > 0)
+      : STANDARD_ROLL_WIDTHS;
     const rollLength = parseFloat(max_roll_length) > 0 ? parseFloat(max_roll_length) : DEFAULT_ROLL_LENGTH;
     const leftoverThreshold = (() => {
       const t = parseFloat(rawLeftoverThreshold);
@@ -266,14 +272,14 @@ class Optimizer {
       for (const item of bucket.items) {
         const sw = item.selected_widths && item.selected_widths.length > 0
           ? item.selected_widths
-          : STANDARD_ROLL_WIDTHS;
+          : defaultWidths;
         for (const w of sw) widthSet.add(w);
       }
       const candidateWidths = [...widthSet].sort((a, b) => a - b);
 
       let unassigned = [...bucket.items];
       while (unassigned.length > 0) {
-        const best = this._findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode);
+        const best = this._findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode, defaultWidths);
         if (!best) {
           const names = unassigned.map(i => `"${i.shade_number}"`).join(', ');
           throw new Error(
@@ -531,13 +537,13 @@ class Optimizer {
 
   // Score every (width, eligible items) assignment, return the best one.
   // Score = total piece area × utilization — favors widths that fit the most pieces well.
-  _findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode) {
+  _findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode, defaultWidths = STANDARD_ROLL_WIDTHS) {
     let best = null;
     for (const w of candidateWidths) {
       const eligible = unassigned.filter(item => {
         const sw = item.selected_widths && item.selected_widths.length > 0
           ? item.selected_widths
-          : STANDARD_ROLL_WIDTHS;
+          : defaultWidths;
         return sw.some(v => Math.abs(v - w) < WIDTH_TOL);
       });
       if (eligible.length === 0) continue;
