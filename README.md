@@ -384,4 +384,4 @@ Items already shipped are in [FEATURES.md](FEATURES.md). Open improvements:
 
 ---
 
-*Built with [Claude Code](https://claude.com/claude-code).*
+
