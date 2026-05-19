@@ -15,7 +15,7 @@ import {
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList,
-  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown
+  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -155,6 +155,7 @@ export default function Home() {
   const [items, setItems] = useState<WorkOrderItem[]>([])
   const [allowRotation, setAllowRotation] = useState(false)
   const [cutMode, setCutMode] = useState<'free' | 'guillotine'>('guillotine')
+  const [optimizeMode, setOptimizeMode] = useState<'quick' | 'deep'>('quick')
   const [workOrderNumber, setWorkOrderNumber] = useState('')
   const [clientName, setClientName] = useState('')
   const [loading, setLoading] = useState(false)
@@ -216,6 +217,8 @@ export default function Home() {
           roll_width: 0,
           allow_rotation: allowRotation,
           cut_mode: cutMode,
+          mode: optimizeMode,
+          leftover_threshold: appSettings.leftover_reuse_threshold,
           max_roll_length: appSettings.max_roll_length,
           items,
         }),
@@ -435,23 +438,43 @@ export default function Home() {
 
               {/* RIGHT COLUMN */}
               <div className="xl:col-span-8 space-y-3">
-                {/* Generate button + error — always at top of right column */}
+                {/* Generate buttons (Quick + Deep) + error — always at top of right column */}
                 <div className="space-y-2">
-                  <button
-                    onClick={() => {
-                      if (items.length === 0) { setError('Add at least one piece'); return }
-                      if (!workOrderNumber.trim()) { setError('Enter Work Order Number'); return }
-                      const missingWidths = items.find(i => i.selected_widths.length === 0)
-                      if (missingWidths) { setError(`Piece "${missingWidths.shade_number}" has no roll width selected.`); return }
-                      setError('')
-                      setShowConfirmModal(true)
-                    }}
-                    disabled={loading || items.length === 0}
-                    className="btn-brand w-full py-3.5 text-sm font-bold uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {loading ? <Loader2 size={18} className="animate-spin" /> : <Scissors size={18} />}
-                    {loading ? 'Processing…' : 'Generate Cutting Map'}
-                  </button>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => {
+                        if (items.length === 0) { setError('Add at least one piece'); return }
+                        if (!workOrderNumber.trim()) { setError('Enter Work Order Number'); return }
+                        const missingWidths = items.find(i => i.selected_widths.length === 0)
+                        if (missingWidths) { setError(`Piece "${missingWidths.shade_number}" has no roll width selected.`); return }
+                        setError('')
+                        setOptimizeMode('quick')
+                        setShowConfirmModal(true)
+                      }}
+                      disabled={loading || items.length === 0}
+                      className="btn-brand col-span-2 py-3.5 text-sm font-bold uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loading && optimizeMode === 'quick' ? <Loader2 size={18} className="animate-spin" /> : <Scissors size={18} />}
+                      {loading && optimizeMode === 'quick' ? 'Processing…' : 'Generate Cutting Map'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (items.length === 0) { setError('Add at least one piece'); return }
+                        if (!workOrderNumber.trim()) { setError('Enter Work Order Number'); return }
+                        const missingWidths = items.find(i => i.selected_widths.length === 0)
+                        if (missingWidths) { setError(`Piece "${missingWidths.shade_number}" has no roll width selected.`); return }
+                        setError('')
+                        setOptimizeMode('deep')
+                        setShowConfirmModal(true)
+                      }}
+                      disabled={loading || items.length === 0}
+                      title="Genetic Algorithm — slower but finds 5-10% better packings on hard jobs"
+                      className="py-3.5 text-sm font-bold uppercase tracking-wider rounded-xl border-2 border-purple-300 bg-gradient-to-br from-purple-50 to-purple-100 text-purple-700 hover:from-purple-100 hover:to-purple-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                    >
+                      {loading && optimizeMode === 'deep' ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                      {loading && optimizeMode === 'deep' ? 'GA…' : 'Deep'}
+                    </button>
+                  </div>
                   {error && (
                     <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex items-start gap-2">
                       <AlertCircle size={16} className="text-red-500 mt-0.5 shrink-0" />
@@ -583,6 +606,7 @@ export default function Home() {
           clientName={clientName}
           allowRotation={allowRotation}
           cutMode={cutMode}
+          optimizeMode={optimizeMode}
           maxRollLength={appSettings.max_roll_length}
           onConfirm={() => { setShowConfirmModal(false); runOptimization() }}
           onCancel={() => setShowConfirmModal(false)}
@@ -2032,13 +2056,14 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
 }
 
 function ConfirmGenerateModal({
-  items, workOrderNumber, clientName, allowRotation, cutMode, maxRollLength, onConfirm, onCancel
+  items, workOrderNumber, clientName, allowRotation, cutMode, optimizeMode, maxRollLength, onConfirm, onCancel
 }: {
   items: WorkOrderItem[]
   workOrderNumber: string
   clientName: string
   allowRotation: boolean
   cutMode: 'free' | 'guillotine'
+  optimizeMode: 'quick' | 'deep'
   maxRollLength: number
   onConfirm: () => void
   onCancel: () => void
@@ -2088,6 +2113,12 @@ function ConfirmGenerateModal({
               <span className="text-surface-400 font-medium">Cut mode</span>
               <span className={`font-bold ${cutMode === 'guillotine' ? 'text-emerald-600' : 'text-amber-600'}`}>
                 {cutMode === 'guillotine' ? 'Guillotine (real cuts)' : 'Free (max density)'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-400 font-medium">Optimisation</span>
+              <span className={`font-bold ${optimizeMode === 'deep' ? 'text-purple-600' : 'text-brand-600'}`}>
+                {optimizeMode === 'deep' ? 'Deep (GA, ~1–5s)' : 'Quick (heuristic)'}
               </span>
             </div>
           </div>

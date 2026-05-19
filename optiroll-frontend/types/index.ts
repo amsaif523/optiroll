@@ -51,11 +51,23 @@ export interface RollWidthSuggestion {
   all_fit: boolean
 }
 
+export interface RollWidthGroup {
+  roll_width: number
+  material_type: string
+  color: string
+  pattern: string | null
+  item_count: number
+  sheets: number
+}
+
 export interface OptimizeResponse {
   job_id: number
   work_order_number: string
   client_name: string
   roll_width: number
+  roll_width_groups?: RollWidthGroup[]
+  cut_mode?: 'free' | 'guillotine'
+  mode?: 'quick' | 'deep'
   max_roll_length: number
   total_pieces: number
   total_sheets: number
