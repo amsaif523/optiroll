@@ -336,77 +336,108 @@ class Optimizer {
         }
       }
 
-      // PHASE 1: Reuse leftovers first
+      // PHASE 1: SMART leftover packing — each round, dry-run every eligible leftover
+      // and pick the one that places the most pieces (ties broken by min used length).
       const leftovers = await Leftover.findByMaterialSignature(material_type, color, pattern);
-      const sortedLeftovers = [...leftovers].sort((a, b) => (b.width * b.length) - (a.width * a.length));
+      let eligibleLeftovers = leftovers.filter(l =>
+        parseFloat(l.width) >= effectiveRollWidth * leftoverThreshold
+      );
 
-      for (const leftover of sortedLeftovers) {
-        if (this.blindQueue.length === 0) break;
-        if (parseFloat(leftover.width) < effectiveRollWidth * leftoverThreshold) continue;
+      while (this.blindQueue.length > 0 && eligibleLeftovers.length > 0) {
+        const snapshot = [...this.blindQueue];
+        let bestLeftover = null;
+        let bestCount = 0;
+        let bestUsedLength = Infinity;
 
+        // Trial run on each candidate (snapshot/restore around the mutating packSheet)
+        for (const leftover of eligibleLeftovers) {
+          this.blindQueue = [...snapshot];
+          const { placed } = this.packSheet({
+            width: parseFloat(leftover.width),
+            length: parseFloat(leftover.length),
+            allow_rotation: allowRotation,
+            cut_mode: cutMode
+          });
+          if (placed.length === 0) continue;
+          const usedLength = Math.max(...placed.map(p => p.y + p.height));
+          if (placed.length > bestCount ||
+              (placed.length === bestCount && usedLength < bestUsedLength)) {
+            bestLeftover = leftover;
+            bestCount = placed.length;
+            bestUsedLength = usedLength;
+          }
+        }
+
+        if (!bestLeftover) {
+          this.blindQueue = snapshot; // no candidate helped — bail to Phase 2
+          break;
+        }
+
+        // Commit on the winner: re-run the pack against a fresh snapshot copy
+        this.blindQueue = [...snapshot];
         const { placed, freeRects } = this.packSheet({
-          width: parseFloat(leftover.width),
-          length: parseFloat(leftover.length),
+          width: parseFloat(bestLeftover.width),
+          length: parseFloat(bestLeftover.length),
           allow_rotation: allowRotation,
           cut_mode: cutMode
         });
 
-        if (placed.length > 0) {
-          sheetCounter++;
-          this.usedLeftovers.push(leftover.id);
-          const usedLength = Math.max(...placed.map(p => p.y + p.height));
-          const remainingLength = parseFloat(leftover.length) - usedLength;
+        sheetCounter++;
+        this.usedLeftovers.push(bestLeftover.id);
+        const usedLength = Math.max(...placed.map(p => p.y + p.height));
+        const remainingLength = parseFloat(bestLeftover.length) - usedLength;
 
-          if (remainingLength < 0.1) {
-            await Leftover.markUsed(leftover.id);
-          } else {
-            await Leftover.updateDimensions(leftover.id, parseFloat(leftover.width), remainingLength);
-          }
+        if (remainingLength < 0.1) {
+          await Leftover.markUsed(bestLeftover.id);
+        } else {
+          await Leftover.updateDimensions(bestLeftover.id, parseFloat(bestLeftover.width), remainingLength);
+        }
 
-          let previousBlinds = [];
-          let originalWidth = parseFloat(leftover.width);
-          let originalLength = parseFloat(leftover.length);
-          let leftoverOffsetX = 0;
-          let leftoverOffsetY = 0;
+        let previousBlinds = [];
+        let originalWidth = parseFloat(bestLeftover.width);
+        let originalLength = parseFloat(bestLeftover.length);
+        let leftoverOffsetX = 0;
+        let leftoverOffsetY = 0;
 
-          if (leftover.source_job_id) {
-            const prevResults = await OptimizationResult.findByJob(leftover.source_job_id);
-            for (const pr of prevResults) {
-              const prevWaste = safeParse(pr.reusable_leftovers);
-              const prevBlinds = safeParse(pr.blinds_placed);
-              const matched = prevWaste.find(wl =>
-                Math.abs(parseFloat(wl.width) - parseFloat(leftover.width)) < 0.01 &&
-                Math.abs(parseFloat(wl.height) - parseFloat(leftover.length)) < 0.01
-              );
-              if (matched) {
+        if (bestLeftover.source_job_id) {
+          const prevResults = await OptimizationResult.findByJob(bestLeftover.source_job_id);
+          for (const pr of prevResults) {
+            const prevWaste = safeParse(pr.reusable_leftovers);
+            const prevBlinds = safeParse(pr.blinds_placed);
+            const matched = prevWaste.find(wl =>
+              Math.abs(parseFloat(wl.width) - parseFloat(bestLeftover.width)) < 0.01 &&
+              Math.abs(parseFloat(wl.height) - parseFloat(bestLeftover.length)) < 0.01
+            );
+            if (matched) {
+              originalWidth = parseFloat(pr.roll_width);
+              originalLength = parseFloat(pr.roll_length_used);
+              leftoverOffsetX = parseFloat(matched.x);
+              leftoverOffsetY = parseFloat(matched.y);
+              previousBlinds = prevBlinds;
+              break;
+            }
+            if (Math.abs(parseFloat(pr.roll_width) - parseFloat(bestLeftover.width)) < 0.01) {
+              const prevUsedLength = parseFloat(pr.roll_length_used);
+              const tailLength = rollLength - prevUsedLength;
+              if (Math.abs(tailLength - parseFloat(bestLeftover.length)) < 0.1) {
                 originalWidth = parseFloat(pr.roll_width);
-                originalLength = parseFloat(pr.roll_length_used);
-                leftoverOffsetX = parseFloat(matched.x);
-                leftoverOffsetY = parseFloat(matched.y);
+                originalLength = rollLength;
+                leftoverOffsetX = 0;
+                leftoverOffsetY = prevUsedLength;
                 previousBlinds = prevBlinds;
                 break;
               }
-              if (Math.abs(parseFloat(pr.roll_width) - parseFloat(leftover.width)) < 0.01) {
-                const prevUsedLength = parseFloat(pr.roll_length_used);
-                const tailLength = rollLength - prevUsedLength;
-                if (Math.abs(tailLength - parseFloat(leftover.length)) < 0.1) {
-                  originalWidth = parseFloat(pr.roll_width);
-                  originalLength = rollLength;
-                  leftoverOffsetX = 0;
-                  leftoverOffsetY = prevUsedLength;
-                  previousBlinds = prevBlinds;
-                  break;
-                }
-              }
             }
           }
-
-          await this.saveSheetResult(
-            job.id, sheetCounter, 'leftover',
-            parseFloat(leftover.width), usedLength, placed, freeRects,
-            previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
-          );
         }
+
+        await this.saveSheetResult(
+          job.id, sheetCounter, 'leftover',
+          parseFloat(bestLeftover.width), usedLength, placed, freeRects,
+          previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
+        );
+
+        eligibleLeftovers = eligibleLeftovers.filter(l => l.id !== bestLeftover.id);
       }
 
       // PHASE 2: Fresh rolls
