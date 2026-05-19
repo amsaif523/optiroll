@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
-import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors } from 'lucide-react'
 
 const IN_TO_M = 0.0254
 const fmtDim = (v: number) => v.toFixed(5)
@@ -15,6 +15,8 @@ interface Props {
   availableWidths: number[]
   allowRotation: boolean
   onAllowRotationChange: (v: boolean) => void
+  cutMode: 'free' | 'guillotine'
+  onCutModeChange: (v: 'free' | 'guillotine') => void
 }
 
 interface ImportResult {
@@ -26,6 +28,7 @@ export default function WorkOrderBuilder({
   items, onChange,
   availableWidths,
   allowRotation, onAllowRotationChange,
+  cutMode, onCutModeChange,
 }: Props) {
   const [form, setForm] = useState({
     shade_number: '',
@@ -443,6 +446,34 @@ export default function WorkOrderBuilder({
             >
               <span className={`absolute top-[2px] left-[2px] w-[17px] h-[17px] bg-white rounded-full shadow transition-transform ${allowRotation ? 'translate-x-5' : ''}`} />
             </button>
+          </div>
+
+          {/* Cut Mode toggle: guillotine = real cross-cuts, free = max density */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Scissors size={14} className="text-surface-500" />
+              <span className="text-xs font-semibold text-surface-600">Cut Mode</span>
+            </div>
+            <div className="flex gap-1 p-1 bg-white border border-surface-200 rounded-lg">
+              {(['guillotine', 'free'] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={() => onCutModeChange(m)}
+                  className={`flex-1 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all ${
+                    cutMode === m
+                      ? 'bg-brand-600 text-white shadow-sm'
+                      : 'text-surface-500 hover:bg-surface-100'
+                  }`}
+                >
+                  {m === 'guillotine' ? 'Guillotine' : 'Free'}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-surface-400 leading-snug">
+              {cutMode === 'guillotine'
+                ? 'Straight cross-cuts only — always cuttable on a real fabric machine.'
+                : 'Max density (MAXRECTS) — may need non-straight cuts.'}
+            </p>
           </div>
         </div>
 

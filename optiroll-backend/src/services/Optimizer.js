@@ -4,6 +4,8 @@ const STANDARD_ROLL_WIDTHS = [2.0, 2.5, 2.8, 2.9, 3.0];
 const MIN_REUSABLE_WIDTH = 0.3;
 const MIN_REUSABLE_LENGTH = 0.5;
 const DEFAULT_ROLL_LENGTH = 30;
+const WIDTH_TOL = 0.001;
+const DEFAULT_CUT_MODE = 'free'; // 'free' = MAXRECTS, 'guillotine' = ShelfPacker (real cross-cuts)
 
 // Maximal Rectangles (MAXRECTS) — best practical 2D bin packing algorithm.
 class MaxRects {
@@ -96,6 +98,88 @@ class MaxRects {
   getFreeRects() { return [...this.freeRects]; }
 }
 
+// 2-stage guillotine packer (horizontal shelves). Every cut is realisable on a real
+// cross-cutter: first cut the roll into shelves across the width, then slice each
+// shelf into pieces along the length. Slightly more waste than MAXRECTS but always cuttable.
+class ShelfPacker {
+  constructor(width, length) {
+    this.binWidth = width;
+    this.binLength = length;
+    this.shelves = []; // [{ y, height, usedWidth }]
+    this.usedRects = [];
+  }
+
+  insert(itemW, itemH, _heuristic, allowRotation) {
+    let bestShelf = null;
+    let bestRotated = false;
+    let bestRem = Infinity;
+
+    // Best-fit on existing shelves (prefer shelf with smallest residual width waste)
+    for (const shelf of this.shelves) {
+      const remW = this.binWidth - shelf.usedWidth;
+      if (itemW <= remW && itemH <= shelf.height && remW - itemW < bestRem) {
+        bestShelf = shelf; bestRotated = false; bestRem = remW - itemW;
+      }
+      if (allowRotation && itemW !== itemH && itemH <= remW && itemW <= shelf.height && remW - itemH < bestRem) {
+        bestShelf = shelf; bestRotated = true; bestRem = remW - itemH;
+      }
+    }
+
+    if (bestShelf) {
+      const placedW = bestRotated ? itemH : itemW;
+      const placedH = bestRotated ? itemW : itemH;
+      const rect = { x: bestShelf.usedWidth, y: bestShelf.y, width: placedW, height: placedH };
+      bestShelf.usedWidth += placedW;
+      this.usedRects.push(rect);
+      return { ...rect, rotated: bestRotated };
+    }
+
+    // Open a new shelf below the last one
+    const nextY = this.shelves.length === 0
+      ? 0
+      : this.shelves[this.shelves.length - 1].y + this.shelves[this.shelves.length - 1].height;
+
+    if (itemW <= this.binWidth && nextY + itemH <= this.binLength) {
+      const shelf = { y: nextY, height: itemH, usedWidth: itemW };
+      this.shelves.push(shelf);
+      const rect = { x: 0, y: nextY, width: itemW, height: itemH };
+      this.usedRects.push(rect);
+      return { ...rect, rotated: false };
+    }
+    if (allowRotation && itemH !== itemW && itemH <= this.binWidth && nextY + itemW <= this.binLength) {
+      const shelf = { y: nextY, height: itemW, usedWidth: itemH };
+      this.shelves.push(shelf);
+      const rect = { x: 0, y: nextY, width: itemH, height: itemW };
+      this.usedRects.push(rect);
+      return { ...rect, rotated: true };
+    }
+    return null;
+  }
+
+  getUsedLength() {
+    if (this.shelves.length === 0) return 0;
+    const last = this.shelves[this.shelves.length - 1];
+    return last.y + last.height;
+  }
+
+  getFreeRects() {
+    const free = [];
+    for (const shelf of this.shelves) {
+      if (shelf.usedWidth < this.binWidth) {
+        free.push({
+          x: shelf.usedWidth, y: shelf.y,
+          width: this.binWidth - shelf.usedWidth, height: shelf.height
+        });
+      }
+    }
+    const lastY = this.getUsedLength();
+    if (lastY < this.binLength) {
+      free.push({ x: 0, y: lastY, width: this.binWidth, height: this.binLength - lastY });
+    }
+    return free;
+  }
+}
+
 class Optimizer {
   constructor() {
     this.results = [];
@@ -106,11 +190,23 @@ class Optimizer {
   async optimizeWorkOrder(payload) {
     const {
       work_order_number, client_name, items,
-      allow_rotation, max_roll_length
+      allow_rotation, max_roll_length,
+      cut_mode: rawCutMode
     } = payload;
 
+    const cutMode = rawCutMode === 'guillotine' ? 'guillotine' : DEFAULT_CUT_MODE;
+    const allowRotation = allow_rotation || false;
     const rollLength = parseFloat(max_roll_length) > 0 ? parseFloat(max_roll_length) : DEFAULT_ROLL_LENGTH;
     if (!items || items.length === 0) throw new Error('No items in work order');
+
+    // Sanitize per-item selected_widths (drop NaN / non-positive entries)
+    for (const item of items) {
+      if (Array.isArray(item.selected_widths)) {
+        item.selected_widths = item.selected_widths
+          .map(Number)
+          .filter(v => Number.isFinite(v) && v > 0);
+      }
+    }
 
     // Validate all items heights fit
     for (const item of items) {
@@ -124,20 +220,11 @@ class Optimizer {
       }
     }
 
-    const materialType = items[0].material_type;
-    const color = items[0].color;
-    const pattern = items[0].pattern || null;
-    for (const item of items) {
-      if (item.material_type !== materialType || item.color !== color || (item.pattern || null) !== pattern) {
-        throw new Error('All items must have the same material, color, and pattern');
-      }
-    }
-
-    // Create job
+    // Create job + persist items
     const job = await Job.create({
       work_order_number: work_order_number || null,
       client_name: client_name || null,
-      allow_rotation: allow_rotation || false
+      allow_rotation: allowRotation
     });
     let totalPieces = 0;
     for (const item of items) {
@@ -145,15 +232,54 @@ class Optimizer {
       totalPieces += parseInt(item.quantity) || 1;
     }
 
-    // Group items by their selected_widths (each unique set is a separate packing run)
-    const groupMap = new Map();
+    // BUCKET by (material, color, pattern) — items in different buckets can never share a sheet
+    const buckets = new Map();
     for (const item of items) {
-      const sw = Array.isArray(item.selected_widths) && item.selected_widths.length > 0
-        ? item.selected_widths.map(Number).sort((a, b) => a - b)
-        : STANDARD_ROLL_WIDTHS.slice().sort((a, b) => a - b);
-      const key = JSON.stringify(sw);
-      if (!groupMap.has(key)) groupMap.set(key, { widths: sw, items: [] });
-      groupMap.get(key).items.push(item);
+      const key = `${item.material_type}|${item.color}|${item.pattern || ''}`;
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          material_type: item.material_type,
+          color: item.color,
+          pattern: item.pattern || null,
+          items: []
+        });
+      }
+      buckets.get(key).items.push(item);
+    }
+
+    // CROSS-GROUP WIDTH MERGING: within each material bucket, iteratively pick the
+    // (roll_width, item subset) assignment with the best packing score. Items whose
+    // selected_widths share a common width can now end up on the same sheet.
+    const finalGroups = [];
+    for (const [, bucket] of buckets) {
+      // Union of all candidate widths usable in this bucket
+      const widthSet = new Set();
+      for (const item of bucket.items) {
+        const sw = item.selected_widths && item.selected_widths.length > 0
+          ? item.selected_widths
+          : STANDARD_ROLL_WIDTHS;
+        for (const w of sw) widthSet.add(w);
+      }
+      const candidateWidths = [...widthSet].sort((a, b) => a - b);
+
+      let unassigned = [...bucket.items];
+      while (unassigned.length > 0) {
+        const best = this._findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode);
+        if (!best) {
+          const names = unassigned.map(i => `"${i.shade_number}"`).join(', ');
+          throw new Error(
+            `No roll width can fit pieces: ${names}. Check piece widths vs selected roll widths.`
+          );
+        }
+        finalGroups.push({
+          width: best.width,
+          items: best.items,
+          material_type: bucket.material_type,
+          color: bucket.color,
+          pattern: bucket.pattern
+        });
+        unassigned = unassigned.filter(i => !best.items.includes(i));
+      }
     }
 
     this.results = [];
@@ -161,6 +287,7 @@ class Optimizer {
     let sheetCounter = 0;
     let primaryRollWidth = null;
     const allSuggestions = [];
+    const rollWidthGroups = []; // per-group breakdown for UI
 
     const safeParse = (val) => {
       if (!val) return [];
@@ -168,31 +295,15 @@ class Optimizer {
       try { return JSON.parse(val); } catch { return []; }
     };
 
-    for (const [, group] of groupMap) {
-      // Pick best roll width for this group
-      const sug = this.suggestRollWidths(group.items, group.widths, rollLength, allow_rotation || false);
-      if (sug.length === 0) {
-        const names = group.items.map(i => `"${i.shade_number}"`).join(', ');
-        throw new Error(
-          `No roll width can fit the pieces: ${names}. Check piece widths vs selected roll widths.`
-        );
-      }
-      const effectiveRollWidth = sug[0].width;
+    for (const group of finalGroups) {
+      const effectiveRollWidth = group.width;
+      const { material_type, color, pattern } = group;
       if (!primaryRollWidth) primaryRollWidth = effectiveRollWidth;
-      for (const s of sug) {
-        if (!allSuggestions.some(e => e.width === s.width)) allSuggestions.push(s);
-      }
 
-      // Validate widths fit
-      for (const item of group.items) {
-        const w = parseFloat(item.width);
-        if (w > effectiveRollWidth) {
-          throw new Error(
-            `Blind "${item.shade_number}" width ${w.toFixed(5)}m exceeds roll width ${effectiveRollWidth}m. ` +
-            `Select a wider roll or reduce the piece width.`
-          );
-        }
-      }
+      // Per-group suggestion (for UI display)
+      const sug = this.simulatePacking(group.items, effectiveRollWidth, rollLength, allowRotation, cutMode);
+      if (!allSuggestions.some(e => Math.abs(e.width - sug.width) < WIDTH_TOL)) allSuggestions.push(sug);
+      const groupSheetStart = sheetCounter;
 
       // Build blind queue for this group
       this.blindQueue = [];
@@ -212,15 +323,13 @@ class Optimizer {
             valence,
             final_height: finalHeight,
             piece_index: i,
-            material_type: materialType,
-            color,
-            pattern
+            material_type, color, pattern
           });
         }
       }
 
       // PHASE 1: Reuse leftovers first
-      const leftovers = await Leftover.findByMaterialSignature(materialType, color, pattern);
+      const leftovers = await Leftover.findByMaterialSignature(material_type, color, pattern);
       const sortedLeftovers = [...leftovers].sort((a, b) => (b.width * b.length) - (a.width * a.length));
 
       for (const leftover of sortedLeftovers) {
@@ -230,7 +339,8 @@ class Optimizer {
         const { placed, freeRects } = this.packSheet({
           width: parseFloat(leftover.width),
           length: parseFloat(leftover.length),
-          allow_rotation: allow_rotation || false
+          allow_rotation: allowRotation,
+          cut_mode: cutMode
         });
 
         if (placed.length > 0) {
@@ -297,7 +407,8 @@ class Optimizer {
         const { placed, freeRects } = this.packSheet({
           width: effectiveRollWidth,
           length: rollLength,
-          allow_rotation: allow_rotation || false
+          allow_rotation: allowRotation,
+          cut_mode: cutMode
         });
 
         if (placed.length === 0) {
@@ -314,9 +425,7 @@ class Optimizer {
           await Leftover.create({
             width: effectiveRollWidth,
             length: remainingLength,
-            material_type: materialType,
-            color,
-            pattern,
+            material_type, color, pattern,
             source_job_id: job.id
           });
         }
@@ -327,6 +436,13 @@ class Optimizer {
           [], effectiveRollWidth, usedLength, 0, 0
         );
       }
+
+      rollWidthGroups.push({
+        roll_width: effectiveRollWidth,
+        material_type, color, pattern,
+        item_count: group.items.length,
+        sheets: sheetCounter - groupSheetStart
+      });
     }
 
     const stats = this.calculateJobStats();
@@ -344,6 +460,8 @@ class Optimizer {
       work_order_number,
       client_name,
       roll_width: primaryRollWidth,
+      roll_width_groups: rollWidthGroups,
+      cut_mode: cutMode,
       max_roll_length: rollLength,
       total_pieces: totalPieces,
       total_sheets: this.results.length,
@@ -355,15 +473,69 @@ class Optimizer {
     };
   }
 
-  // Runs all 16 strategy combinations and returns best placement.
-  packSheet({ width, length, allow_rotation }) {
-    const HEURISTICS = ['BSSF', 'BLSF', 'BAF', 'BL'];
-    const SORT_FNS = [
-      (a, b) => (b.width * b.final_height) - (a.width * a.final_height),
-      (a, b) => b.final_height - a.final_height,
-      (a, b) => b.width - a.width,
-      (a, b) => (b.width + b.final_height) - (a.width + a.final_height),
-    ];
+  // Score every (width, eligible items) assignment, return the best one.
+  // Score = total piece area × utilization — favors widths that fit the most pieces well.
+  _findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode) {
+    let best = null;
+    for (const w of candidateWidths) {
+      const eligible = unassigned.filter(item => {
+        const sw = item.selected_widths && item.selected_widths.length > 0
+          ? item.selected_widths
+          : STANDARD_ROLL_WIDTHS;
+        return sw.some(v => Math.abs(v - w) < WIDTH_TOL);
+      });
+      if (eligible.length === 0) continue;
+
+      const allFit = eligible.every(item => {
+        const iw = parseFloat(item.width);
+        const valence = parseFloat(item.valence || 0);
+        const finalH = item.blind_type === 'zebra'
+          ? (parseFloat(item.height) * 2) + valence
+          : parseFloat(item.height) + valence;
+        const fitsNormal  = iw <= w && finalH <= rollLength;
+        const fitsRotated = allowRotation && finalH <= w && iw <= rollLength;
+        return fitsNormal || fitsRotated;
+      });
+      if (!allFit) continue;
+
+      const sim = this.simulatePacking(eligible, w, rollLength, allowRotation, cutMode);
+      if (!sim.all_fit) continue;
+
+      const totalPieceArea = eligible.reduce((sum, item) => {
+        const qty = parseInt(item.quantity) || 1;
+        const valence = parseFloat(item.valence || 0);
+        const finalH = item.blind_type === 'zebra'
+          ? (parseFloat(item.height) * 2) + valence
+          : parseFloat(item.height) + valence;
+        return sum + qty * parseFloat(item.width) * finalH;
+      }, 0);
+      const score = totalPieceArea * sim.utilization;
+
+      if (!best || score > best.score) {
+        best = { width: w, items: eligible, score, utilization: sim.utilization, sheets: sim.sheets };
+      }
+    }
+    return best;
+  }
+
+  // Runs all heuristic × sort combinations and returns best placement.
+  // cut_mode: 'free' uses MAXRECTS (best utilisation, may need non-guillotine cuts).
+  //           'guillotine' uses ShelfPacker (2-stage cross-cuts, always physically cuttable).
+  packSheet({ width, length, allow_rotation, cut_mode }) {
+    const mode = cut_mode === 'guillotine' ? 'guillotine' : 'free';
+    const HEURISTICS = mode === 'guillotine' ? ['SHELF'] : ['BSSF', 'BLSF', 'BAF', 'BL'];
+    // For shelf packing, sorting by height descending (FFDH) is canonical and dominant.
+    const SORT_FNS = mode === 'guillotine'
+      ? [
+          (a, b) => b.final_height - a.final_height,
+          (a, b) => (b.width * b.final_height) - (a.width * a.final_height),
+        ]
+      : [
+          (a, b) => (b.width * b.final_height) - (a.width * a.final_height),
+          (a, b) => b.final_height - a.final_height,
+          (a, b) => b.width - a.width,
+          (a, b) => (b.width + b.final_height) - (a.width + a.final_height),
+        ];
 
     let bestPlaced = [];
     let bestUsedLength = Infinity;
@@ -372,7 +544,7 @@ class Optimizer {
     for (const heuristic of HEURISTICS) {
       for (const sortFn of SORT_FNS) {
         const candidates = [...this.blindQueue].sort(sortFn);
-        const bin = new MaxRects(width, length);
+        const bin = mode === 'guillotine' ? new ShelfPacker(width, length) : new MaxRects(width, length);
         const placed = [];
 
         for (const blind of candidates) {
@@ -413,7 +585,7 @@ class Optimizer {
   }
 
   // Pure simulation — no DB writes. Returns utilization for a given roll width.
-  simulatePacking(items, width, rollLength, allowRotation) {
+  simulatePacking(items, width, rollLength, allowRotation, cutMode = DEFAULT_CUT_MODE) {
     const queue = [];
     for (const item of items) {
       const qty = parseInt(item.quantity) || 1;
@@ -440,7 +612,7 @@ class Optimizer {
     let allFit = true;
 
     while (this.blindQueue.length > 0) {
-      const { placed } = this.packSheet({ width, length: rollLength, allow_rotation: allowRotation });
+      const { placed } = this.packSheet({ width, length: rollLength, allow_rotation: allowRotation, cut_mode: cutMode });
       if (placed.length === 0) { allFit = false; break; }
       const usedLength = Math.max(...placed.map(p => p.y + p.height));
       totalBlindArea += placed.reduce((sum, p) => sum + p.width * p.height, 0);
@@ -455,7 +627,7 @@ class Optimizer {
   }
 
   // Runs simulation for all available widths and returns sorted suggestions.
-  suggestRollWidths(items, availableWidths, rollLength, allowRotation) {
+  suggestRollWidths(items, availableWidths, rollLength, allowRotation, cutMode = DEFAULT_CUT_MODE) {
     const results = [];
     for (const w of availableWidths) {
       let allFit = true;
@@ -470,7 +642,7 @@ class Optimizer {
         if (!fitsNormal && !fitsRotated) { allFit = false; break; }
       }
       if (!allFit) continue;
-      const sim = this.simulatePacking(items, w, rollLength, allowRotation);
+      const sim = this.simulatePacking(items, w, rollLength, allowRotation, cutMode);
       if (sim.all_fit) results.push(sim);
     }
     return results.sort((a, b) => b.utilization - a.utilization);

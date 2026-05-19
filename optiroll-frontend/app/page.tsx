@@ -154,6 +154,7 @@ const dataTableStyles = {
 export default function Home() {
   const [items, setItems] = useState<WorkOrderItem[]>([])
   const [allowRotation, setAllowRotation] = useState(false)
+  const [cutMode, setCutMode] = useState<'free' | 'guillotine'>('guillotine')
   const [workOrderNumber, setWorkOrderNumber] = useState('')
   const [clientName, setClientName] = useState('')
   const [loading, setLoading] = useState(false)
@@ -213,6 +214,7 @@ export default function Home() {
           client_name: clientName,
           roll_width: 0,
           allow_rotation: allowRotation,
+          cut_mode: cutMode,
           max_roll_length: appSettings.max_roll_length,
           items,
         }),
@@ -414,6 +416,8 @@ export default function Home() {
                   availableWidths={appSettings.roll_widths}
                   allowRotation={allowRotation}
                   onAllowRotationChange={setAllowRotation}
+                  cutMode={cutMode}
+                  onCutModeChange={setCutMode}
                 />
 
                 {/* Max roll length hint */}
@@ -577,6 +581,7 @@ export default function Home() {
           workOrderNumber={workOrderNumber}
           clientName={clientName}
           allowRotation={allowRotation}
+          cutMode={cutMode}
           maxRollLength={appSettings.max_roll_length}
           onConfirm={() => { setShowConfirmModal(false); runOptimization() }}
           onCancel={() => setShowConfirmModal(false)}
@@ -2026,12 +2031,13 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
 }
 
 function ConfirmGenerateModal({
-  items, workOrderNumber, clientName, allowRotation, maxRollLength, onConfirm, onCancel
+  items, workOrderNumber, clientName, allowRotation, cutMode, maxRollLength, onConfirm, onCancel
 }: {
   items: WorkOrderItem[]
   workOrderNumber: string
   clientName: string
   allowRotation: boolean
+  cutMode: 'free' | 'guillotine'
   maxRollLength: number
   onConfirm: () => void
   onCancel: () => void
@@ -2075,6 +2081,12 @@ function ConfirmGenerateModal({
               <span className="text-surface-400 font-medium">90° Rotation</span>
               <span className={`font-bold ${allowRotation ? 'text-emerald-600' : 'text-surface-500'}`}>
                 {allowRotation ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-surface-400 font-medium">Cut mode</span>
+              <span className={`font-bold ${cutMode === 'guillotine' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {cutMode === 'guillotine' ? 'Guillotine (real cuts)' : 'Free (max density)'}
               </span>
             </div>
           </div>
