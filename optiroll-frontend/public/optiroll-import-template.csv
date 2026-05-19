@@ -1,0 +1,4 @@
+Shade #,Type (roller/zebra),Width ("),Height ("),Valence (") [default 6],Qty,Material [default Polyester],Color [default White],Pattern [default Plain],Roll Widths (m) [comma-sep or "all"]
+BR-001,roller,48,72,6,1,Polyester,White,Plain,all
+BR-002,zebra,36,60,6,2,Polyester,Beige,Plain,"2.5,2.8"
+BR-003,roller,24,48,6,1,Blackout,Grey,Plain,2.5

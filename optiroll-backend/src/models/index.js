@@ -5,6 +5,24 @@ const query = async (sql, params) => {
   return rows;
 };
 
+const pageArgs = (page = 1, limit = 20) => {
+  const safePage = Math.max(parseInt(page) || 1, 1);
+  const safeLimit = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
+  return {
+    page: safePage,
+    limit: safeLimit,
+    offset: (safePage - 1) * safeLimit
+  };
+};
+
+const pagedResult = (rows, total, page, limit) => ({
+  rows,
+  total,
+  page,
+  limit,
+  total_pages: Math.max(Math.ceil(total / limit), 1)
+});
+
 const Roll = {
   create: async (data) => {
     const sql = `INSERT INTO rolls (width, material_type, color, pattern) VALUES (?, ?, ?, ?)`;
@@ -44,6 +62,62 @@ const Leftover = {
     sql += ' ORDER BY width ASC, length ASC';
     return query(sql, params);
   },
+  findById: async (id) => query('SELECT * FROM leftovers WHERE id = ?', [id]),
+  findPage: async (filters = {}) => {
+    const { page, limit, offset } = pageArgs(filters.page, filters.limit);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += ' AND (material_type LIKE ? OR color LIKE ? OR pattern LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.date_from) {
+      where += ' AND created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+    const countRows = await query(`SELECT COUNT(*) AS total FROM leftovers ${where}`, params);
+    const rows = await query(`
+      SELECT *
+      FROM leftovers
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `, params);
+    return pagedResult(rows, countRows[0]?.total || 0, page, limit);
+  },
+  stats: async (filters = {}) => {
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.date_from) {
+      where += ' AND created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+    const rows = await query(`
+      SELECT
+        COUNT(*) AS total_leftovers,
+        SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS available_leftovers,
+        SUM(CASE WHEN status = 'used' THEN 1 ELSE 0 END) AS used_leftovers,
+        COALESCE(SUM(width * length), 0) AS total_area,
+        COALESCE(SUM(CASE WHEN status = 'available' THEN width * length ELSE 0 END), 0) AS available_area
+      FROM leftovers
+      ${where}
+    `, params);
+    return rows[0] || {
+      total_leftovers: 0,
+      available_leftovers: 0,
+      used_leftovers: 0,
+      total_area: 0,
+      available_area: 0
+    };
+  },
   findByMaterialSignature: async (material_type, color, pattern) => {
     return query('SELECT * FROM leftovers WHERE status = "available" AND material_type = ? AND color = ? AND (pattern = ? OR pattern IS NULL) ORDER BY width ASC, length ASC',
       [material_type, color, pattern || null]);
@@ -67,6 +141,66 @@ const Job = {
   },
   findById: async (id) => query('SELECT * FROM jobs WHERE id = ?', [id]),
   findAll: async () => query('SELECT * FROM jobs ORDER BY created_at DESC'),
+  findPage: async (filters = {}) => {
+    const { page, limit, offset } = pageArgs(filters.page, filters.limit);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += ' AND (work_order_number LIKE ? OR client_name LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.status) {
+      where += ' AND status = ?';
+      params.push(filters.status);
+    }
+    if (filters.date_from) {
+      where += ' AND created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+
+    const countRows = await query(`SELECT COUNT(*) AS total FROM jobs ${where}`, params);
+    const rows = await query(`
+      SELECT *
+      FROM jobs
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `, params);
+    return pagedResult(rows, countRows[0]?.total || 0, page, limit);
+  },
+  stats: async (filters = {}) => {
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.date_from) {
+      where += ' AND created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+    const rows = await query(`
+      SELECT
+        COUNT(*) AS total_jobs,
+        COALESCE(SUM(total_pieces), 0) AS total_pieces,
+        COALESCE(SUM(total_sheets), 0) AS total_sheets,
+        COALESCE(AVG(total_utilization_percent), 0) AS avg_utilization,
+        COALESCE(AVG(total_waste_percent), 0) AS avg_waste
+      FROM jobs
+      ${where}
+    `, params);
+    return rows[0] || {
+      total_jobs: 0,
+      total_pieces: 0,
+      total_sheets: 0,
+      avg_utilization: 0,
+      avg_waste: 0
+    };
+  },
   update: async (id, data) => {
     const fields = [];
     const values = [];
@@ -135,4 +269,153 @@ const Setting = {
   getAll: async () => query('SELECT * FROM settings ORDER BY `key`'),
 };
 
-module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, Setting, query };
+const User = {
+  create: async (data) => {
+    const sql = `INSERT INTO users (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)`;
+    const [result] = await pool.execute(sql, [
+      data.username,
+      data.password_hash,
+      data.full_name,
+      data.role || 'operator'
+    ]);
+    return {
+      id: result.insertId,
+      username: data.username,
+      full_name: data.full_name,
+      role: data.role || 'operator'
+    };
+  },
+  findAll: async () => query('SELECT id, username, full_name, role, created_at FROM users ORDER BY created_at DESC'),
+  findPage: async (filters = {}) => {
+    const { page, limit, offset } = pageArgs(filters.page, filters.limit);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += ' AND (username LIKE ? OR full_name LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.role) {
+      where += ' AND role = ?';
+      params.push(filters.role);
+    }
+    const countRows = await query(`SELECT COUNT(*) AS total FROM users ${where}`, params);
+    const rows = await query(`
+      SELECT id, username, full_name, role, created_at
+      FROM users
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `, params);
+    return pagedResult(rows, countRows[0]?.total || 0, page, limit);
+  },
+  findByUsername: async (username) => query('SELECT id FROM users WHERE username = ?', [username])
+};
+
+const humanAction = (action = '') => {
+  const labels = {
+    'auth.login': 'Signed In',
+    'job.optimized': 'Work Order Optimized',
+    'job.deleted': 'Work Order Deleted',
+    'settings.updated': 'Settings Updated',
+    'user.created': 'User Created'
+  };
+  if (labels[action]) return labels[action];
+  return action
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+};
+
+const humanEntity = (entity = '') => {
+  const labels = {
+    user: 'User',
+    job: 'Work Order',
+    settings: 'Settings'
+  };
+  return labels[entity] || (entity ? entity.charAt(0).toUpperCase() + entity.slice(1) : null);
+};
+
+const ActivityLog = {
+  create: async ({ user_id, action, entity_type, entity_id, description, metadata }) => {
+    const sql = `
+      INSERT INTO activity_logs (user_id, action, entity_type, entity_id, description, metadata)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `;
+    try {
+      const [result] = await pool.execute(sql, [
+        user_id || null,
+        action,
+        entity_type || null,
+        entity_id || null,
+        description || null,
+        metadata ? JSON.stringify(metadata) : null
+      ]);
+      return { id: result.insertId };
+    } catch (err) {
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        console.warn('activity_logs table does not exist; skipping activity log');
+        return null;
+      }
+      throw err;
+    }
+  },
+  findPage: async (filters = {}) => {
+    const { page, limit, offset } = pageArgs(filters.page, filters.limit);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += " AND (al.description LIKE ? OR al.action LIKE ? OR REPLACE(al.action, '.', ' ') LIKE ? OR u.username LIKE ? OR u.full_name LIKE ?)";
+      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.action) {
+      where += ' AND al.action = ?';
+      params.push(filters.action);
+    }
+    if (filters.entity_type) {
+      where += ' AND al.entity_type = ?';
+      params.push(filters.entity_type);
+    }
+    if (filters.date_from) {
+      where += ' AND al.created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND al.created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+    try {
+      const countRows = await query(`
+        SELECT COUNT(*) AS total
+        FROM activity_logs al
+        LEFT JOIN users u ON u.id = al.user_id
+        ${where}
+      `, params);
+      const rows = await query(`
+        SELECT
+          al.id, al.user_id, al.action, al.entity_type, al.entity_id,
+          al.description, al.metadata, al.created_at,
+          u.username, u.full_name
+        FROM activity_logs al
+        LEFT JOIN users u ON u.id = al.user_id
+        ${where}
+        ORDER BY al.created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `, params);
+      return pagedResult(rows.map(row => ({
+        ...row,
+        action_label: humanAction(row.action),
+        entity_label: humanEntity(row.entity_type)
+      })), countRows[0]?.total || 0, page, limit);
+    } catch (err) {
+      if (err.code === 'ER_NO_SUCH_TABLE') return pagedResult([], 0, page, limit);
+      throw err;
+    }
+  },
+  findAll: async (limit = 100) => {
+    const result = await ActivityLog.findPage({ page: 1, limit });
+    return result.rows;
+  }
+};
+
+module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, Setting, User, ActivityLog, query };

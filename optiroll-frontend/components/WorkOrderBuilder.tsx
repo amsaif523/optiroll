@@ -1,11 +1,13 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
+import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
-import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X } from 'lucide-react'
 
 const IN_TO_M = 0.0254
 const fmtDim = (v: number) => v.toFixed(5)
+const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
 interface Props {
   items: WorkOrderItem[]
@@ -13,6 +15,11 @@ interface Props {
   availableWidths: number[]
   allowRotation: boolean
   onAllowRotationChange: (v: boolean) => void
+}
+
+interface ImportResult {
+  imported: number
+  skipped: { row: number; reason: string }[]
 }
 
 export default function WorkOrderBuilder({
@@ -32,6 +39,9 @@ export default function WorkOrderBuilder({
     pattern: 'Plain',
     selected_widths: [] as number[],
   })
+
+  const [importResult, setImportResult] = useState<ImportResult | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const toggleWidth = (w: number) => {
     const next = form.selected_widths.includes(w)
@@ -59,8 +69,8 @@ export default function WorkOrderBuilder({
       if (allowRotation) {
         alert(
           `Cannot fit even with 90° rotation.\n\n` +
-          `Normal:  W ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m > ${maxSelected.toFixed(1)}m\n` +
-          `Rotated: H ${(finalHeightM / IN_TO_M).toFixed(5)}" = ${finalHeightM.toFixed(5)}m > ${maxSelected.toFixed(1)}m\n\n` +
+          `Normal:  W ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m > ${fmtRollWidth(maxSelected)}\n` +
+          `Rotated: H ${(finalHeightM / IN_TO_M).toFixed(5)}" = ${finalHeightM.toFixed(5)}m > ${fmtRollWidth(maxSelected)}\n\n` +
           `Select a wider roll or reduce the piece dimensions.`
         )
       } else {
@@ -87,12 +97,127 @@ export default function WorkOrderBuilder({
     }])
   }
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      try {
+        const data = new Uint8Array(ev.target!.result as ArrayBuffer)
+        const wb = XLSX.read(data, { type: 'array' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        const rows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
+
+        if (rows.length < 2) {
+          alert('The file has no data rows (expected at least a header row + 1 data row).')
+          return
+        }
+
+        const newItems: WorkOrderItem[] = []
+        const skipped: { row: number; reason: string }[] = []
+
+        // rows[0] is header, data starts at rows[1]
+        for (let i = 1; i < rows.length; i++) {
+          const r = rows[i] as string[]
+          const rowNum = i + 1
+
+          // Skip completely empty rows
+          if (r.every(cell => String(cell).trim() === '')) continue
+
+          const shadeRaw    = String(r[0] ?? '').trim()
+          const typeRaw     = String(r[1] ?? '').trim().toLowerCase()
+          const widthRaw    = parseFloat(String(r[2] ?? ''))
+          const heightRaw   = parseFloat(String(r[3] ?? ''))
+          const valenceRaw  = parseFloat(String(r[4] ?? ''))
+          const qtyRaw      = parseInt(String(r[5] ?? ''), 10)
+          const materialRaw = String(r[6] ?? '').trim() || 'Polyester'
+          const colorRaw    = String(r[7] ?? '').trim() || 'White'
+          const patternRaw  = String(r[8] ?? '').trim() || 'Plain'
+          const widthsRaw   = String(r[9] ?? '').trim()
+
+          if (!shadeRaw) { skipped.push({ row: rowNum, reason: 'Missing Shade #' }); continue }
+          if (typeRaw !== 'roller' && typeRaw !== 'zebra') {
+            skipped.push({ row: rowNum, reason: `Type must be "roller" or "zebra", got "${r[1]}"` }); continue
+          }
+          if (isNaN(widthRaw) || widthRaw <= 0) {
+            skipped.push({ row: rowNum, reason: 'Width must be a positive number' }); continue
+          }
+          if (isNaN(heightRaw) || heightRaw <= 0) {
+            skipped.push({ row: rowNum, reason: 'Height must be a positive number' }); continue
+          }
+          if (isNaN(qtyRaw) || qtyRaw < 1) {
+            skipped.push({ row: rowNum, reason: 'Qty must be a whole number ≥ 1' }); continue
+          }
+
+          const valenceIn = isNaN(valenceRaw) ? 6 : valenceRaw
+
+          // Parse roll widths
+          let selectedWidths: number[]
+          if (!widthsRaw || widthsRaw.toLowerCase() === 'all') {
+            selectedWidths = [...availableWidths]
+          } else {
+            const parsed = widthsRaw.split(',').map(s => parseFloat(s.trim())).filter(v => !isNaN(v) && v > 0)
+            // Match against available widths (within 1mm tolerance)
+            selectedWidths = parsed
+              .map(v => availableWidths.find(aw => Math.abs(aw - v) < 0.001))
+              .filter((v): v is number => v !== undefined)
+          }
+
+          if (selectedWidths.length === 0) {
+            if (availableWidths.length === 0) {
+              skipped.push({ row: rowNum, reason: 'No roll widths configured in Settings' }); continue
+            }
+            skipped.push({ row: rowNum, reason: `Roll width(s) "${widthsRaw}" not found in configured widths` }); continue
+          }
+
+          const widthM   = widthRaw  * IN_TO_M
+          const heightM  = heightRaw * IN_TO_M
+          const valenceM = valenceIn * IN_TO_M
+          const finalHeightM = typeRaw === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
+          const maxW = Math.max(...selectedWidths)
+
+          if (widthM > maxW && !(allowRotation && finalHeightM <= maxW)) {
+            skipped.push({
+              row: rowNum,
+              reason: `Piece ${widthRaw}" wide won't fit on selected roll widths (max ${fmtRollWidth(maxW)})`,
+            })
+            continue
+          }
+
+          newItems.push({
+            id: crypto.randomUUID(),
+            shade_number:    shadeRaw,
+            blind_type:      typeRaw as 'roller' | 'zebra',
+            width:           widthM,
+            height:          heightM,
+            valence:         valenceM,
+            quantity:        qtyRaw,
+            material_type:   materialRaw,
+            color:           colorRaw,
+            pattern:         patternRaw,
+            selected_widths: selectedWidths,
+          })
+        }
+
+        if (newItems.length > 0) {
+          onChange([...items, ...newItems])
+        }
+        setImportResult({ imported: newItems.length, skipped })
+      } catch {
+        alert('Failed to read the file. Make sure it is a valid .xlsx or .xls file.')
+      }
+    }
+    reader.readAsArrayBuffer(file)
+  }
+
   const finalHDisplay = (() => {
     if (isNaN(form.height)) return null
     const hM  = form.height * IN_TO_M
     const vM  = isNaN(form.valence) ? 0 : form.valence * IN_TO_M
     const fhM = form.blind_type === 'zebra' ? hM * 2 + vM : hM + vM
-    return fhM / IN_TO_M  // back to inches for display
+    return fhM / IN_TO_M
   })()
 
   return (
@@ -106,6 +231,64 @@ export default function WorkOrderBuilder({
       </div>
 
       <div className="panel-body space-y-4">
+
+        {/* Excel import bar */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg border border-dashed border-emerald-400 bg-emerald-50 text-emerald-700 text-xs font-bold hover:bg-emerald-100 transition-colors"
+          >
+            <Upload size={13} /> Import Excel
+          </button>
+          <a
+            href="/optiroll-import-template.csv"
+            download
+            title="Download CSV template"
+            className="flex items-center gap-1.5 py-2 px-3 rounded-lg border border-surface-200 bg-white text-surface-500 text-xs font-bold hover:bg-surface-50 transition-colors"
+          >
+            <Download size={13} /> Template
+          </a>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={handleFileChange}
+          />
+        </div>
+
+        {/* Import result banner */}
+        {importResult && (
+          <div className={`rounded-lg border px-3 py-2.5 text-xs ${
+            importResult.skipped.length === 0
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+              : importResult.imported === 0
+                ? 'bg-red-50 border-red-200 text-red-700'
+                : 'bg-amber-50 border-amber-200 text-amber-700'
+          }`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1 min-w-0">
+                <p className="font-bold">
+                  {importResult.imported > 0
+                    ? `✓ ${importResult.imported} piece${importResult.imported !== 1 ? 's' : ''} imported`
+                    : '✗ No pieces imported'}
+                  {importResult.skipped.length > 0 && ` · ${importResult.skipped.length} row${importResult.skipped.length !== 1 ? 's' : ''} skipped`}
+                </p>
+                {importResult.skipped.length > 0 && (
+                  <ul className="space-y-0.5 text-[11px] opacity-80">
+                    {importResult.skipped.map(s => (
+                      <li key={s.row}>Row {s.row}: {s.reason}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <button onClick={() => setImportResult(null)} className="shrink-0 opacity-60 hover:opacity-100">
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Blind type toggle */}
         <div className="flex gap-1 p-1 bg-surface-100 rounded-lg">
           {(['roller', 'zebra'] as const).map(t => (
@@ -234,7 +417,7 @@ export default function WorkOrderBuilder({
                           : 'bg-white text-surface-500 border border-surface-200 hover:bg-surface-100'
                       }`}
                     >
-                      {w.toFixed(1)}m
+                      {fmtRollWidth(w)}
                     </button>
                   )
                 })}
@@ -245,7 +428,7 @@ export default function WorkOrderBuilder({
                 ? '⚠ Select at least one roll width for this piece.'
                 : form.selected_widths.length === availableWidths.length
                   ? 'All widths selected — optimizer picks best for this piece.'
-                  : `${form.selected_widths.map(w => `${w.toFixed(1)}m`).join(', ')} selected.`}
+                  : `${form.selected_widths.map(fmtRollWidth).join(', ')} selected.`}
             </p>
           </div>
 

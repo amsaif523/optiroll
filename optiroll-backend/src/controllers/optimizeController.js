@@ -1,5 +1,5 @@
 const Optimizer = require('../services/Optimizer');
-const { OptimizationResult, Setting } = require('../models');
+const { OptimizationResult, Setting, ActivityLog } = require('../models');
 
 const optimizer = new Optimizer();
 
@@ -18,6 +18,18 @@ exports.run = async (req, res, next) => {
     const result = await optimizer.optimizeWorkOrder({
       ...req.body,
       max_roll_length
+    });
+    await ActivityLog.create({
+      user_id: req.user?.id,
+      action: 'job.optimized',
+      entity_type: 'job',
+      entity_id: result.job_id,
+      description: `Optimized work order ${result.work_order_number || result.job_id}`,
+      metadata: {
+        total_pieces: result.total_pieces,
+        total_sheets: result.total_sheets,
+        roll_width: result.roll_width
+      }
     });
     res.json({ success: true, data: result });
   } catch (err) {

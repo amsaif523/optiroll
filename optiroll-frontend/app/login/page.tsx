@@ -6,7 +6,6 @@ import { Scissors, Eye, EyeOff, Loader2, AlertCircle, Lock, User, CheckCircle2 }
 import { setToken } from '@/lib/auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
-const YEAR = new Date().getFullYear()
 
 export default function LoginPage() {
   const router = useRouter()
@@ -67,11 +66,6 @@ export default function LoginPage() {
 
           {/* Centre content */}
           <div className="flex flex-col justify-center flex-1 py-12">
-            {/* Eyebrow */}
-            <span className="text-indigo-400 text-xs font-bold uppercase tracking-[0.18em] mb-5">
-              Blinds Manufacturing
-            </span>
-
             {/* Headline */}
             <h1 className="text-[3.25rem] font-black text-white leading-[1.08] tracking-tight mb-6">
               Cut smarter.<br />
@@ -103,7 +97,7 @@ export default function LoginPage() {
 
           {/* Footer */}
           <p className="text-slate-600 text-xs">
-            © {YEAR} OptiRoll · v1.1.0
+            &copy; 2026 <a href="https://amsaifinfotech.com/" target="_blank" rel="noreferrer" className="font-semibold text-slate-400 hover:text-white">Amsaif Infotech</a>. All rights reserved.
           </p>
         </div>
       </div>
@@ -192,7 +186,7 @@ export default function LoginPage() {
           </form>
 
           <p className="text-center text-[11px] text-gray-400 mt-8">
-            © {YEAR} OptiRoll · Blinds Manufacturing
+            &copy; 2026 <a href="https://amsaifinfotech.com/" target="_blank" rel="noreferrer" className="font-semibold text-indigo-600 hover:text-indigo-700">Amsaif Infotech</a>. All rights reserved.
           </p>
         </div>
       </div>

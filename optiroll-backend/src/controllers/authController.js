@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const db = require('../config/database');
+const { ActivityLog } = require('../models');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'optiroll-dev-secret-change-in-production';
 
@@ -24,6 +25,14 @@ exports.login = async (req, res, next) => {
 
     const payload = { id: user.id, username: user.username, full_name: user.full_name, role: user.role };
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
+
+    await ActivityLog.create({
+      user_id: user.id,
+      action: 'auth.login',
+      entity_type: 'user',
+      entity_id: user.id,
+      description: `Signed in as ${user.username}`
+    });
 
     res.json({
       success: true,

@@ -8,6 +8,8 @@ interface Props {
   sheet: Sheet
 }
 
+const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
+
 // Renders the cut map to a canvas context. Pure function — no side effects.
 function renderCutMap(
   ctx: CanvasRenderingContext2D,
@@ -47,18 +49,18 @@ function renderCutMap(
 
   if (isLeftover && hasPrevious) {
     ctx.fillText(
-      `Sheet #${sheet.sheet_number}  ·  Reused Leftover  ·  Original: ${canvasWidth.toFixed(2)}m × ${canvasLength.toFixed(2)}m`,
+      `Sheet #${sheet.sheet_number}  ·  Reused Leftover  ·  Original: ${fmtRollWidth(canvasWidth)} × ${canvasLength.toFixed(2)}m`,
       MARGIN, 20
     )
     ctx.fillStyle = '#9aa3b8'
     ctx.font = '12px Inter, sans-serif'
     ctx.fillText(
-      `Leftover zone: ${offX.toFixed(2)},${offY.toFixed(2)} → ${(offX + sheet.width).toFixed(2)}m × ${(offY + sheet.length).toFixed(2)}m  ·  Util ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
+      `Leftover zone: ${offX.toFixed(2)},${offY.toFixed(2)} → ${fmtRollWidth(offX + sheet.width)} × ${(offY + sheet.length).toFixed(2)}m  ·  Util ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
       MARGIN, 44
     )
   } else {
     ctx.fillText(
-      `Sheet #${sheet.sheet_number}  ·  Fresh Roll  ·  ${sheet.width}m × ${sheet.length.toFixed(2)}m`,
+      `Sheet #${sheet.sheet_number}  ·  Fresh Roll  ·  ${fmtRollWidth(sheet.width)} × ${sheet.length.toFixed(2)}m`,
       MARGIN, 20
     )
     ctx.fillStyle = '#9aa3b8'
@@ -245,7 +247,7 @@ function renderCutMap(
   ctx.font = '11px Inter, sans-serif'
   ctx.textAlign = 'center'
   ctx.fillText('0', MARGIN, TOPBAR + MARGIN - 8)
-  ctx.fillText(`${canvasWidth.toFixed(1)}m`, MARGIN + sw, TOPBAR + MARGIN - 8)
+  ctx.fillText(fmtRollWidth(canvasWidth), MARGIN + sw, TOPBAR + MARGIN - 8)
   ctx.textAlign = 'right'
   ctx.fillText('0', MARGIN - 8, TOPBAR + MARGIN + 12)
   ctx.fillText(`${canvasLength.toFixed(2)}m`, MARGIN - 8, TOPBAR + MARGIN + sh - 6)
@@ -337,7 +339,7 @@ export default function CutMapCanvas({ sheet }: Props) {
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillText(
-      `OptiRoll  ·  Sheet #${sheet.sheet_number}  ·  Roll ${sheet.width}m wide × ${sheet.length.toFixed(2)}m used  ·  Utilization ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
+      `OptiRoll  ·  Sheet #${sheet.sheet_number}  ·  Roll ${fmtRollWidth(sheet.width)} wide × ${sheet.length.toFixed(2)}m used  ·  Utilization ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
       A3_W_PX / 2, A3_H_PX - FOOTER_H / 2 - 4
     )
 
@@ -359,7 +361,7 @@ export default function CutMapCanvas({ sheet }: Props) {
               </span>
               {isLeftover && (
                 <span className="text-xs text-amber-600 font-medium">
-                  ← Original: {sheet.original_width?.toFixed(2)}m × {sheet.original_length?.toFixed(2)}m
+                  ← Original: {fmtRollWidth(sheet.original_width || 0)} × {sheet.original_length?.toFixed(2)}m
                 </span>
               )}
             </div>

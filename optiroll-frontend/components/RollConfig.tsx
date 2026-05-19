@@ -2,6 +2,8 @@
 
 import { RotateCcw, TrendingUp } from 'lucide-react'
 
+const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
+
 interface RollWidthSuggestion {
   width: number
   utilization: number
@@ -39,10 +41,10 @@ export default function RollConfig({
           <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
             <TrendingUp size={14} className="text-emerald-600 shrink-0" />
             <span className="text-xs text-emerald-700 font-medium">
-              Suggested: <strong>{best.width.toFixed(1)}m</strong> roll — {best.utilization}% utilization
+              Suggested: <strong>{fmtRollWidth(best.width)}</strong> roll — {best.utilization}% utilization
               {suggestions && suggestions.length > 1 && (
                 <span className="text-emerald-500 font-normal">
-                  {' '}(vs {suggestions[1].width.toFixed(1)}m at {suggestions[1].utilization}%)
+                  {' '}(vs {fmtRollWidth(suggestions[1].width)} at {suggestions[1].utilization}%)
                 </span>
               )}
             </span>
@@ -67,7 +69,7 @@ export default function RollConfig({
                         : 'bg-surface-100 text-surface-500 hover:bg-surface-200 hover:text-surface-700'
                   }`}
                 >
-                  {w.toFixed(1)}m
+                  {fmtRollWidth(w)}
                   {isBest && rollWidth !== w && (
                     <span className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-emerald-400 rounded-full border-2 border-white" title="Best utilization" />
                   )}

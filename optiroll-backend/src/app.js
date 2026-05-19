@@ -19,6 +19,9 @@ app.use('/api/leftovers', auth, require('./routes/leftovers'));
 app.use('/api/jobs', auth, require('./routes/jobs'));
 app.use('/api/optimize', auth, require('./routes/optimize'));
 app.use('/api/settings', auth, require('./routes/settings'));
+app.use('/api/users', auth, require('./routes/users'));
+app.use('/api/activity', auth, require('./routes/activity'));
+app.use('/api/dashboard', auth, require('./routes/dashboard'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'optiroll-backend' });

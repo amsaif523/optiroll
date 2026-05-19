@@ -133,6 +133,22 @@ const initDB = async () => {
     )
   `);
 
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT,
+      action VARCHAR(80) NOT NULL,
+      entity_type VARCHAR(50),
+      entity_id INT,
+      description VARCHAR(255),
+      metadata JSON,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_created_at (created_at),
+      INDEX idx_user (user_id),
+      INDEX idx_entity (entity_type, entity_id)
+    )
+  `);
+
   const defaultSettings = [
     ['roll_widths', JSON.stringify([2.0, 2.5, 2.8, 2.9, 3.0])],
     ['max_roll_length', '30'],

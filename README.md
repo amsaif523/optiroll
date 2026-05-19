@@ -316,3 +316,11 @@ optiroll-frontend/
 - [ ] Authentication & user roles
 - [ ] Real-time WebSocket updates
 - [ ] Better packing algorithm (e.g., Maximal Rectangles, Skyline)
+
+
+› now keep all the date human freindly like 05 may 2026 and in activity log keep action also human freidnly please rn
+  comming like seeting.update and all dont needed and also when i apply the f ilte ri have to click on filte rbutton to
+  apply it hsould apply direcy=tly and in place of filter button give reset icon so i can reset all the filter you
+  getting me and make the dropden looks preminum rn too simply and all and in date range by default slect 1 month form
+  today in date rane in all pages please and it should get applied also filter in backend and all you getting me you
+  have fill acees to this folder dont ask me for revies and running thing

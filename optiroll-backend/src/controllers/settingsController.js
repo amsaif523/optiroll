@@ -1,4 +1,4 @@
-const { Setting } = require('../models');
+const { Setting, ActivityLog } = require('../models');
 
 exports.getSettings = async (req, res, next) => {
   try {
@@ -20,6 +20,13 @@ exports.updateSettings = async (req, res, next) => {
     for (const [key, value] of Object.entries(updates)) {
       await Setting.set(key, value);
     }
+    await ActivityLog.create({
+      user_id: req.user?.id,
+      action: 'settings.updated',
+      entity_type: 'settings',
+      description: 'Updated application settings',
+      metadata: updates
+    });
     res.json({ success: true, message: 'Settings updated' });
   } catch (err) {
     next(err);

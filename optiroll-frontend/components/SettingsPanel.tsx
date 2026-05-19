@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Settings, Plus, Trash2, Save, RotateCcw } from 'lucide-react'
+import { Settings, Plus, Trash2, Save, RotateCcw, Ruler, Gauge } from 'lucide-react'
 import { getToken } from '@/lib/auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   roll_widths: [2.0, 2.5, 2.8, 2.9, 3.0],
   max_roll_length: 30,
 }
+const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
 export default function SettingsPanel({ onSettingsChange }: Props) {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
@@ -77,8 +78,7 @@ export default function SettingsPanel({ onSettingsChange }: Props) {
     const w = parseFloat(newWidth)
     if (isNaN(w) || w <= 0 || w > 10) { setError('Width must be between 0 and 10 m'); return }
     if (settings.roll_widths.includes(w)) { setError('Width already exists'); return }
-    const updated = [...settings.roll_widths, w].sort((a, b) => a - b)
-    setSettings(s => ({ ...s, roll_widths: updated }))
+    setSettings(s => ({ ...s, roll_widths: [...s.roll_widths, w].sort((a, b) => a - b) }))
     setNewWidth('')
     setError('')
   }
@@ -95,105 +95,117 @@ export default function SettingsPanel({ onSettingsChange }: Props) {
   }
 
   return (
-    <div className="space-y-5">
-      <div className="panel">
-        <div className="panel-header">
-          <div className="flex items-center gap-2">
-            <Settings size={16} className="text-brand-600" />
-            <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Roll Width Options</h3>
+    <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
+      <div className="xl:col-span-8 space-y-5">
+        <div className="panel overflow-hidden">
+          <div className="panel-header bg-surface-50">
+            <div className="flex items-center gap-2">
+              <Ruler size={16} className="text-brand-600" />
+              <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Roll Width Options</h3>
+            </div>
+            <button onClick={resetDefaults} className="btn-ghost flex items-center gap-1.5 text-xs text-surface-400 hover:text-surface-600">
+              <RotateCcw size={13} /> Reset defaults
+            </button>
           </div>
-          <button
-            onClick={resetDefaults}
-            className="btn-ghost flex items-center gap-1.5 text-xs text-surface-400 hover:text-surface-600"
-          >
-            <RotateCcw size={13} /> Reset defaults
-          </button>
-        </div>
-        <div className="panel-body space-y-4">
-          <p className="text-xs text-surface-400">
-            These widths appear in Roll Configuration when building a work order.
-          </p>
-
-          {/* Current widths */}
-          <div className="flex flex-wrap gap-2">
-            {settings.roll_widths.map(w => (
-              <div
-                key={w}
-                className="flex items-center gap-1.5 bg-brand-50 border border-brand-200 rounded-lg px-3 py-1.5"
-              >
-                <span className="text-sm font-bold text-brand-700">{w.toFixed(1)}m</span>
-                <button
-                  onClick={() => removeWidth(w)}
-                  className="text-brand-400 hover:text-red-500 transition-colors"
-                >
-                  <Trash2 size={12} />
-                </button>
+          <div className="panel-body space-y-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-surface-700">Allowed production roll widths</p>
+                <p className="text-xs text-surface-400 mt-1">Operators choose from these meter widths while adding each piece.</p>
               </div>
-            ))}
-          </div>
+              <span className="badge bg-brand-50 text-brand-700 border border-brand-200">{settings.roll_widths.length} widths</span>
+            </div>
 
-          {/* Add new width */}
-          <div className="flex gap-2">
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="10"
-              value={newWidth}
-              onChange={e => setNewWidth(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && addWidth()}
-              placeholder="e.g. 3.2"
-              className="w-32 text-center"
-            />
-            <span className="flex items-center text-sm text-surface-500 font-medium">m</span>
-            <button
-              onClick={addWidth}
-              className="btn-ghost flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700"
-            >
-              <Plus size={14} /> Add Width
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+              {settings.roll_widths.map(w => (
+                <div key={w} className="flex items-center justify-between bg-white border border-surface-200 rounded-lg px-3 py-3 shadow-sm">
+                  <span className="text-sm font-black text-surface-800">{fmtRollWidth(w)}</span>
+                  <button onClick={() => removeWidth(w)} className="text-surface-300 hover:text-red-500 transition-colors" title="Remove width">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-surface-50 border border-surface-200 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  max="10"
+                  value={newWidth}
+                  onChange={e => setNewWidth(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addWidth()}
+                  placeholder="e.g. 3.2"
+                  className="w-36 text-center"
+                />
+                <span className="text-sm text-surface-500 font-medium">meters</span>
+              </div>
+              <button onClick={addWidth} className="btn-ghost bg-white border border-surface-200 flex items-center gap-1.5 text-xs font-semibold text-brand-600 hover:text-brand-700">
+                <Plus size={14} /> Add Width
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel overflow-hidden">
+          <div className="panel-header bg-surface-50">
+            <div className="flex items-center gap-2">
+              <Gauge size={16} className="text-brand-600" />
+              <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Roll Length Limit</h3>
+            </div>
+          </div>
+          <div className="panel-body grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+            <div className="md:col-span-8">
+              <p className="text-sm font-semibold text-surface-700">Maximum fabric roll length</p>
+              <p className="text-xs text-surface-400 mt-1">Pieces with final height above this limit are blocked before optimization.</p>
+            </div>
+            <div className="md:col-span-4 flex items-center gap-3">
+              <input
+                type="number"
+                step="1"
+                min="1"
+                max="200"
+                value={settings.max_roll_length}
+                onChange={e => setSettings(s => ({ ...s, max_roll_length: parseFloat(e.target.value) || 30 }))}
+                className="w-28 text-center font-mono font-bold"
+              />
+              <span className="text-sm font-medium text-surface-500">meters</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="xl:col-span-4 space-y-5">
+        <div className="panel">
+          <div className="panel-header bg-surface-50">
+            <div className="flex items-center gap-2">
+              <Settings size={16} className="text-brand-600" />
+              <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Summary</h3>
+            </div>
+          </div>
+          <div className="panel-body space-y-4">
+            <div className="stat-card">
+              <p className="text-[11px] font-bold text-surface-400 uppercase tracking-wider">Configured Widths</p>
+              <p className="text-2xl font-black text-surface-800 mt-1">{settings.roll_widths.length}</p>
+            </div>
+            <div className="stat-card">
+              <p className="text-[11px] font-bold text-surface-400 uppercase tracking-wider">Max Roll Length</p>
+              <p className="text-2xl font-black text-brand-600 mt-1">{settings.max_roll_length}m</p>
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">{error}</div>
+            )}
+
+            <button onClick={saveSettings} disabled={saving} className="btn-brand w-full py-3 text-sm font-bold uppercase tracking-wider disabled:opacity-50 flex items-center justify-center gap-2">
+              <Save size={16} />
+              {saving ? 'Saving...' : saved ? 'Saved' : 'Save Settings'}
             </button>
           </div>
         </div>
       </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <div className="flex items-center gap-2">
-            <Settings size={16} className="text-brand-600" />
-            <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Roll Length Limit</h3>
-          </div>
-        </div>
-        <div className="panel-body space-y-3">
-          <p className="text-xs text-surface-400">
-            Maximum length of a fabric roll. Used as the roll height limit during optimization.
-          </p>
-          <div className="flex items-center gap-3">
-            <input
-              type="number"
-              step="1"
-              min="1"
-              max="200"
-              value={settings.max_roll_length}
-              onChange={e => setSettings(s => ({ ...s, max_roll_length: parseFloat(e.target.value) || 30 }))}
-              className="w-28 text-center"
-            />
-            <span className="text-sm font-medium text-surface-500">meters</span>
-          </div>
-        </div>
-      </div>
-
-      {error && (
-        <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">{error}</div>
-      )}
-
-      <button
-        onClick={saveSettings}
-        disabled={saving}
-        className="btn-brand w-full py-3 text-sm font-bold uppercase tracking-wider disabled:opacity-50 flex items-center justify-center gap-2"
-      >
-        <Save size={16} />
-        {saving ? 'Saving…' : saved ? 'Saved!' : 'Save Settings'}
-      </button>
     </div>
   )
 }
