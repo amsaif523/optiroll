@@ -10,11 +10,11 @@ export const metadata: Metadata = {
   metadataBase: new URL('https://optiroll.app'),
 
   title: {
-    default: 'OptiRoll — Roll Cutting Optimisation',
+    default: 'OptiRoll  Roll Cutting Optimisation',
     template: '%s | OptiRoll',
   },
   description:
-    'OptiRoll is a professional roll-cutting optimisation platform for blinds manufacturers. Minimise fabric waste, auto-select roll widths, and generate cut maps for roller and zebra blinds — all in one place.',
+    'OptiRoll is a professional roll-cutting optimisation platform for blinds manufacturers. Minimise fabric waste, auto-select roll widths, and generate cut maps for roller and zebra blinds  all in one place.',
   keywords: [
     'blinds manufacturing',
     'roll cutting optimisation',
@@ -42,7 +42,7 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: 'https://optiroll.app',
     siteName: 'OptiRoll',
-    title: 'OptiRoll — Roll Cutting Optimisation for Blinds Manufacturers',
+    title: 'OptiRoll  Roll Cutting Optimisation for Blinds Manufacturers',
     description:
       'Minimise fabric waste and generate precise cut maps for roller & zebra blinds. Smart roll-width selection, leftover reuse, and A3 PDF export.',
     images: [
@@ -50,14 +50,14 @@ export const metadata: Metadata = {
         url: '/og-image.png',
         width: 1200,
         height: 630,
-        alt: 'OptiRoll — Roll Cutting Optimisation',
+        alt: 'OptiRoll  Roll Cutting Optimisation',
       },
     ],
   },
 
   twitter: {
     card: 'summary_large_image',
-    title: 'OptiRoll — Roll Cutting Optimisation',
+    title: 'OptiRoll  Roll Cutting Optimisation',
     description:
       'Smart fabric cutting optimisation for blinds manufacturers. Reduce waste, reuse leftovers, export A3 cut maps.',
     images: ['/og-image.png'],
