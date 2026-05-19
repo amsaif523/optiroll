@@ -1,0 +1,19 @@
+Shade #,Type (roller/zebra),Width ("),Height ("),Valence (") [default 6],Qty,Material [default Polyester],Color [default White],Pattern [default Plain],Roll Widths (m) [comma-sep or "all"],Grain Locked [yes/no]
+HTL-101,roller,48,72,6,4,Polyester,Cream,Plain,all,no
+HTL-102,roller,42,72,6,4,Polyester,Cream,Plain,"2.5,2.8",no
+HTL-103,zebra,36,60,6,2,Polyester,White,Plain,"2.5,2.8",no
+HTL-104,zebra,30,54,6,2,Polyester,White,Plain,2.5,no
+HTL-201,roller,60,84,6,3,Blackout,Grey,Stripe,"2.8,3.0",yes
+HTL-202,roller,48,72,6,3,Blackout,Grey,Stripe,"2.5,2.8",no
+HTL-203,roller,36,60,6,2,Blackout,Black,Plaid,"2.5,2.8",yes
+HTL-301,zebra,42,72,6,2,Linen,Beige,Floral,"2.8,3.0",yes
+HTL-302,zebra,36,60,6,2,Linen,Beige,Floral,"2.5,2.8",no
+HTL-303,roller,30,48,6,4,Linen,Cream,Plain,"2.5,2.8",no
+HTL-401,roller,72,96,8,1,Polyester,White,Plain,"2.8,3.0",no
+HTL-402,roller,54,84,6,2,Polyester,White,Plain,"2.8,3.0",no
+HTL-403,roller,24,36,6,6,Polyester,White,Plain,"2.0,2.5",no
+HTL-404,roller,18,30,6,4,Polyester,White,Plain,"2.0,2.5",no
+HTL-BAD-1,triangle,40,60,6,1,Polyester,White,Plain,2.5,no
+HTL-BAD-2,roller,,72,6,2,Polyester,White,Plain,2.5,no
+HTL-BAD-3,roller,40,60,6,0,Polyester,White,Plain,2.5,no
+HTL-BAD-4,roller,40,60,6,1,Polyester,White,Plain,9.9,no
