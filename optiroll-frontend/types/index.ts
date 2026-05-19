@@ -10,6 +10,7 @@ export interface WorkOrderItem {
   color: string
   pattern: string
   selected_widths: number[]  // roll widths (meters) this piece can be cut from
+  grain_locked?: boolean     // if true, this piece can't be rotated (striped/patterned fabric)
 }
 
 export interface BlindPlaced {
@@ -68,4 +69,5 @@ export interface OptimizeResponse {
 export interface AppSettings {
   roll_widths: number[]
   max_roll_length: number
+  leftover_reuse_threshold?: number  // 0–1, fraction of effective roll width a leftover must reach to qualify
 }

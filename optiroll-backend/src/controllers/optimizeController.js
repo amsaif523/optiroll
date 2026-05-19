@@ -15,9 +15,14 @@ exports.run = async (req, res, next) => {
     const max_roll_length = req.body.max_roll_length
       || (maxLengthSetting ? parseFloat(maxLengthSetting) : 30);
 
+    const leftoverSetting = await Setting.get('leftover_reuse_threshold');
+    const leftover_threshold = req.body.leftover_threshold
+      ?? (leftoverSetting ? parseFloat(leftoverSetting) : 0.8);
+
     const result = await optimizer.optimizeWorkOrder({
       ...req.body,
-      max_roll_length
+      max_roll_length,
+      leftover_threshold
     });
     await ActivityLog.create({
       user_id: req.user?.id,

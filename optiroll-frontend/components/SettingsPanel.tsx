@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Settings, Plus, Trash2, Save, RotateCcw, Ruler, Gauge } from 'lucide-react'
+import { Settings, Plus, Trash2, Save, RotateCcw, Ruler, Gauge, Recycle } from 'lucide-react'
 import { getToken } from '@/lib/auth'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -9,6 +9,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
 interface AppSettings {
   roll_widths: number[]
   max_roll_length: number
+  leftover_reuse_threshold: number  // 0–1, fraction of effective roll width
 }
 
 interface Props {
@@ -18,6 +19,7 @@ interface Props {
 const DEFAULT_SETTINGS: AppSettings = {
   roll_widths: [2.0, 2.5, 2.8, 2.9, 3.0],
   max_roll_length: 30,
+  leftover_reuse_threshold: 0.8,
 }
 const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
@@ -36,9 +38,11 @@ export default function SettingsPanel({ onSettingsChange }: Props) {
       .then(r => r.json())
       .then(data => {
         if (data.success && data.data) {
+          const t = parseFloat(data.data.leftover_reuse_threshold)
           const s: AppSettings = {
             roll_widths: Array.isArray(data.data.roll_widths) ? data.data.roll_widths : DEFAULT_SETTINGS.roll_widths,
             max_roll_length: typeof data.data.max_roll_length === 'number' ? data.data.max_roll_length : DEFAULT_SETTINGS.max_roll_length,
+            leftover_reuse_threshold: Number.isFinite(t) && t > 0 && t <= 1 ? t : DEFAULT_SETTINGS.leftover_reuse_threshold,
           }
           setSettings(s)
           onSettingsChange?.(s)
@@ -61,6 +65,7 @@ export default function SettingsPanel({ onSettingsChange }: Props) {
         body: JSON.stringify({
           roll_widths: settings.roll_widths,
           max_roll_length: settings.max_roll_length,
+          leftover_reuse_threshold: settings.leftover_reuse_threshold,
         }),
       })
       const data = await res.json()
@@ -172,6 +177,40 @@ export default function SettingsPanel({ onSettingsChange }: Props) {
                 className="w-28 text-center font-mono font-bold"
               />
               <span className="text-sm font-medium text-surface-500">meters</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel overflow-hidden">
+          <div className="panel-header bg-surface-50">
+            <div className="flex items-center gap-2">
+              <Recycle size={16} className="text-brand-600" />
+              <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Leftover Reuse Threshold</h3>
+            </div>
+          </div>
+          <div className="panel-body grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+            <div className="md:col-span-8">
+              <p className="text-sm font-semibold text-surface-700">Minimum leftover width (% of job&apos;s roll width)</p>
+              <p className="text-xs text-surface-400 mt-1">
+                A leftover sheet must be at least this fraction of the active roll width to be reused.
+                Lower = more leftover reuse (and more variety of widths attempted). Default 80%.
+              </p>
+            </div>
+            <div className="md:col-span-4 flex items-center gap-3">
+              <input
+                type="number"
+                step="5"
+                min="10"
+                max="100"
+                value={Math.round(settings.leftover_reuse_threshold * 100)}
+                onChange={e => {
+                  const pct = parseFloat(e.target.value)
+                  const clamped = Number.isFinite(pct) ? Math.max(10, Math.min(100, pct)) : 80
+                  setSettings(s => ({ ...s, leftover_reuse_threshold: clamped / 100 }))
+                }}
+                className="w-28 text-center font-mono font-bold"
+              />
+              <span className="text-sm font-medium text-surface-500">%</span>
             </div>
           </div>
         </div>

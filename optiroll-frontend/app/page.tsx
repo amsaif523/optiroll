@@ -170,6 +170,7 @@ export default function Home() {
   const [appSettings, setAppSettings] = useState<AppSettings>({
     roll_widths: [2.0, 2.5, 2.8, 2.9, 3.0],
     max_roll_length: 30,
+    leftover_reuse_threshold: 0.8,
   })
 
   useEffect(() => {

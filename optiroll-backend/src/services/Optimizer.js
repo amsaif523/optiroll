@@ -6,6 +6,7 @@ const MIN_REUSABLE_LENGTH = 0.5;
 const DEFAULT_ROLL_LENGTH = 30;
 const WIDTH_TOL = 0.001;
 const DEFAULT_CUT_MODE = 'free'; // 'free' = MAXRECTS, 'guillotine' = ShelfPacker (real cross-cuts)
+const DEFAULT_LEFTOVER_THRESHOLD = 0.8; // leftover must be ≥ X × effective roll width to qualify
 
 // Maximal Rectangles (MAXRECTS) — best practical 2D bin packing algorithm.
 class MaxRects {
@@ -191,12 +192,18 @@ class Optimizer {
     const {
       work_order_number, client_name, items,
       allow_rotation, max_roll_length,
-      cut_mode: rawCutMode
+      cut_mode: rawCutMode,
+      leftover_threshold: rawLeftoverThreshold
     } = payload;
 
     const cutMode = rawCutMode === 'guillotine' ? 'guillotine' : DEFAULT_CUT_MODE;
     const allowRotation = allow_rotation || false;
     const rollLength = parseFloat(max_roll_length) > 0 ? parseFloat(max_roll_length) : DEFAULT_ROLL_LENGTH;
+    const leftoverThreshold = (() => {
+      const t = parseFloat(rawLeftoverThreshold);
+      if (!Number.isFinite(t) || t <= 0 || t > 1) return DEFAULT_LEFTOVER_THRESHOLD;
+      return t;
+    })();
     if (!items || items.length === 0) throw new Error('No items in work order');
 
     // Sanitize per-item selected_widths (drop NaN / non-positive entries)
@@ -323,6 +330,7 @@ class Optimizer {
             valence,
             final_height: finalHeight,
             piece_index: i,
+            grain_locked: item.grain_locked === true,
             material_type, color, pattern
           });
         }
@@ -334,7 +342,7 @@ class Optimizer {
 
       for (const leftover of sortedLeftovers) {
         if (this.blindQueue.length === 0) break;
-        if (parseFloat(leftover.width) < effectiveRollWidth * 0.8) continue;
+        if (parseFloat(leftover.width) < effectiveRollWidth * leftoverThreshold) continue;
 
         const { placed, freeRects } = this.packSheet({
           width: parseFloat(leftover.width),
@@ -548,7 +556,9 @@ class Optimizer {
         const placed = [];
 
         for (const blind of candidates) {
-          const result = bin.insert(blind.width, blind.final_height, heuristic, allow_rotation);
+          // Per-piece grain lock disables rotation even if the job allows it
+          const pieceAllowRotation = allow_rotation && !blind.grain_locked;
+          const result = bin.insert(blind.width, blind.final_height, heuristic, pieceAllowRotation);
           if (result) {
             placed.push({
               ...blind,

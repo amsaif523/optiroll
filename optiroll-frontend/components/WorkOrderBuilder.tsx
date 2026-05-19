@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
-import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors, Lock } from 'lucide-react'
 
 const IN_TO_M = 0.0254
 const fmtDim = (v: number) => v.toFixed(5)
@@ -41,6 +41,7 @@ export default function WorkOrderBuilder({
     color:   'White',
     pattern: 'Plain',
     selected_widths: [] as number[],
+    grain_locked: false,
   })
 
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
@@ -97,6 +98,7 @@ export default function WorkOrderBuilder({
       color:          form.color,
       pattern:        form.pattern,
       selected_widths: form.selected_widths,
+      grain_locked:   form.grain_locked,
     }])
   }
 
@@ -139,6 +141,8 @@ export default function WorkOrderBuilder({
           const colorRaw    = String(r[7] ?? '').trim() || 'White'
           const patternRaw  = String(r[8] ?? '').trim() || 'Plain'
           const widthsRaw   = String(r[9] ?? '').trim()
+          const grainRaw    = String(r[10] ?? '').trim().toLowerCase()
+          const grainLocked = grainRaw === 'yes' || grainRaw === 'true' || grainRaw === '1' || grainRaw === 'locked'
 
           if (!shadeRaw) { skipped.push({ row: rowNum, reason: 'Missing Shade #' }); continue }
           if (typeRaw !== 'roller' && typeRaw !== 'zebra') {
@@ -201,6 +205,7 @@ export default function WorkOrderBuilder({
             color:           colorRaw,
             pattern:         patternRaw,
             selected_widths: selectedWidths,
+            grain_locked:    grainLocked,
           })
         }
 
@@ -433,6 +438,20 @@ export default function WorkOrderBuilder({
                   ? 'All widths selected — optimizer picks best for this piece.'
                   : `${form.selected_widths.map(fmtRollWidth).join(', ')} selected.`}
             </p>
+
+            {/* Per-piece grain lock — overrides job-wide rotation for striped / patterned fabric */}
+            <label className="mt-2.5 flex items-center justify-between cursor-pointer">
+              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-surface-600">
+                <Lock size={11} className="text-surface-500" />
+                Lock grain (no rotation)
+              </span>
+              <input
+                type="checkbox"
+                checked={form.grain_locked}
+                onChange={e => setForm(f => ({ ...f, grain_locked: e.target.checked }))}
+                className="w-4 h-4 accent-brand-600 cursor-pointer"
+              />
+            </label>
           </div>
 
           <div className="flex items-center justify-between">
