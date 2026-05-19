@@ -154,7 +154,7 @@ const dataTableStyles = {
 export default function Home() {
   const [items, setItems] = useState<WorkOrderItem[]>([])
   const [allowRotation, setAllowRotation] = useState(false)
-  const [cutMode, setCutMode] = useState<'free' | 'guillotine'>('guillotine')
+  const [cutMode, setCutMode] = useState<'free' | 'guillotine'>('free')
   const [optimizeMode, setOptimizeMode] = useState<'quick' | 'deep'>('quick')
   const [workOrderNumber, setWorkOrderNumber] = useState('')
   const [clientName, setClientName] = useState('')
