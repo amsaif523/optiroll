@@ -462,8 +462,10 @@ class Optimizer {
         }
       }
 
+      // Collect Phase 2 sheets in memory so we can run a backfill consolidation
+      // pass before committing leftovers + sheet records.
+      const phase2Sheets = [];
       while (this.blindQueue.length > 0) {
-        sheetCounter++;
         const { placed, freeRects } = this.packSheet({
           width: effectiveRollWidth,
           length: rollLength,
@@ -481,11 +483,28 @@ class Optimizer {
         }
 
         const usedLength = Math.max(...placed.map(p => p.y + p.height));
-        const remainingLength = rollLength - usedLength;
-        if (remainingLength >= MIN_REUSABLE_LENGTH && effectiveRollWidth >= MIN_REUSABLE_WIDTH) {
+        phase2Sheets.push({
+          rollWidth: effectiveRollWidth,
+          rollLength,
+          usedLength,
+          placed,
+          freeRects
+        });
+      }
+
+      // CROSS-SHEET BACKFILL — try to dissolve the least-used sheet by
+      // repacking its pieces into earlier sheets in the same bucket.
+      // No-op when there are 0 or 1 fresh sheets.
+      this._backfillSheets(phase2Sheets, cutMode, allowRotation);
+
+      // Commit Phase 2 sheets to DB + log tail-as-leftover for each fresh roll
+      for (const sd of phase2Sheets) {
+        sheetCounter++;
+        const tailLength = sd.rollLength - sd.usedLength;
+        if (tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
           await Leftover.create({
-            width: effectiveRollWidth,
-            length: remainingLength,
+            width: sd.rollWidth,
+            length: tailLength,
             material_type, color, pattern,
             source_job_id: job.id
           });
@@ -493,8 +512,8 @@ class Optimizer {
 
         await this.saveSheetResult(
           job.id, sheetCounter, 'fresh_roll',
-          effectiveRollWidth, usedLength, placed, freeRects,
-          [], effectiveRollWidth, usedLength, 0, 0
+          sd.rollWidth, sd.usedLength, sd.placed, sd.freeRects,
+          [], sd.rollWidth, sd.usedLength, 0, 0
         );
       }
 
@@ -707,6 +726,78 @@ class Optimizer {
     }
 
     return bestScore === Infinity ? null : bestChromosome;
+  }
+
+  // Cross-sheet backfill: try to dissolve the smallest fresh sheet in a bucket
+  // by repacking its pieces alongside an earlier sheet's pieces.
+  // Mutates `sheets` in place. No-op when fewer than 2 sheets.
+  //
+  // Algorithm — loops until no further consolidation possible:
+  //   1. Pick the sheet with the smallest usedLength (the candidate to dissolve).
+  //   2. For every other sheet, try to repack (target.placed + source.placed)
+  //      on the target's roll dimensions using all 16 packing strategies.
+  //   3. If they all fit, update the target with the new placement and drop
+  //      the source sheet.
+  //   4. Repeat — successive consolidations can cascade.
+  //
+  // Cost: O(N² × packSheet) per bucket where N = sheet count. Negligible
+  // for typical bucket sizes (1-5 sheets).
+  _backfillSheets(sheets, cutMode, allowRotation) {
+    if (sheets.length < 2) return;
+    let changed = true;
+    while (changed && sheets.length >= 2) {
+      changed = false;
+
+      // Find index of sheet with smallest used length (best candidate to dissolve)
+      let srcIdx = 0;
+      for (let i = 1; i < sheets.length; i++) {
+        if (sheets[i].usedLength < sheets[srcIdx].usedLength) srcIdx = i;
+      }
+      const source = sheets[srcIdx];
+
+      // Try merging source into each other sheet
+      for (let i = 0; i < sheets.length; i++) {
+        if (i === srcIdx) continue;
+        const target = sheets[i];
+
+        const combinedItems = [
+          ...target.placed.map(p => this._asQueueItem(p)),
+          ...source.placed.map(p => this._asQueueItem(p))
+        ];
+
+        const savedQ = this.blindQueue;
+        this.blindQueue = combinedItems;
+        const { placed, freeRects } = this.packSheet({
+          width: target.rollWidth,
+          length: target.rollLength,
+          allow_rotation: allowRotation,
+          cut_mode: cutMode
+        });
+        const allFit = this.blindQueue.length === 0;
+        this.blindQueue = savedQ;
+
+        if (allFit && placed.length === combinedItems.length) {
+          target.placed = placed;
+          target.freeRects = freeRects;
+          target.usedLength = Math.max(...placed.map(p => p.y + p.height));
+          sheets.splice(srcIdx, 1);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Recreate the pre-rotation queue dimensions from a placed piece, so backfill
+  // repacking can decide for itself whether to rotate again.
+  _asQueueItem(placed) {
+    const origW = placed.rotated ? placed.height : placed.width;
+    const origH = placed.rotated ? placed.width : placed.height;
+    return {
+      ...placed,
+      width: origW,
+      final_height: origH
+    };
   }
 
   // Runs all heuristic × sort combinations and returns best placement.
