@@ -560,7 +560,7 @@ export default function Home() {
                     </div>
 
                     {result.sheets.map(sheet => (
-                      <CutMapCanvas key={sheet.sheet_number} sheet={sheet} />
+                      <CutMapCanvas key={sheet.sheet_number} sheet={sheet} maxRollLength={result.max_roll_length} />
                     ))}
                   </div>
 

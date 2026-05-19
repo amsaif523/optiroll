@@ -6,9 +6,26 @@ import { ZoomIn, ZoomOut, Download, Eye, EyeOff, Maximize2, Minimize2, History, 
 
 interface Props {
   sheet: Sheet
+  /** Full roll length (m) for fresh rolls — used to compute the tail-saved-as-leftover figure */
+  maxRollLength?: number
 }
 
 const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
+
+// Returns true when a waste rectangle qualifies as a reusable leftover
+// (matches one of the rects the optimiser saved back to inventory).
+function isReusableRect(
+  w: { x: number; y: number; width: number; height: number },
+  reusables: Sheet['reusable_leftovers']
+) {
+  const TOL = 0.005
+  return reusables.some(r =>
+    Math.abs(r.x - w.x) < TOL &&
+    Math.abs(r.y - w.y) < TOL &&
+    Math.abs(r.width - w.width) < TOL &&
+    Math.abs(r.height - w.height) < TOL
+  )
+}
 
 // Renders the cut map to a canvas context. Pure function — no side effects.
 function renderCutMap(
@@ -18,7 +35,8 @@ function renderCutMap(
   showLabels: boolean,
   showPrevious: boolean,
   MARGIN: number,
-  TOPBAR: number
+  TOPBAR: number,
+  maxRollLength?: number
 ) {
   const isLeftover = sheet.sheet_type === 'leftover'
   const hasPrevious = isLeftover && sheet.previous_blinds && sheet.previous_blinds.length > 0
@@ -47,6 +65,20 @@ function renderCutMap(
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
 
+  // Compute breakdown: within-cut areas split into Pieces / Reusable / Trim
+  const cutArea = sheet.width * sheet.length
+  const reusableArea = (sheet.reusable_leftovers || []).reduce((s, r) => s + r.width * r.height, 0)
+  const totalWasteArea = (sheet.waste_areas || []).reduce((s, w) => s + w.width * w.height, 0)
+  const trimArea = Math.max(0, totalWasteArea - reusableArea)
+  const reusablePct = cutArea > 0 ? (reusableArea / cutArea) * 100 : 0
+  const trimPct = cutArea > 0 ? (trimArea / cutArea) * 100 : 0
+
+  // Tail of fresh roll that wasn't cut — automatically saved as leftover by the optimiser
+  const tailLength = (!isLeftover && maxRollLength && maxRollLength > sheet.length)
+    ? maxRollLength - sheet.length
+    : 0
+  const tailArea = tailLength * sheet.width
+
   if (isLeftover && hasPrevious) {
     ctx.fillText(
       `Sheet #${sheet.sheet_number}  ·  Reused Leftover  ·  Original: ${fmtRollWidth(canvasWidth)} × ${canvasLength.toFixed(2)}m`,
@@ -55,7 +87,7 @@ function renderCutMap(
     ctx.fillStyle = '#9aa3b8'
     ctx.font = '12px Inter, sans-serif'
     ctx.fillText(
-      `Leftover zone: ${offX.toFixed(2)},${offY.toFixed(2)} → ${fmtRollWidth(offX + sheet.width)} × ${(offY + sheet.length).toFixed(2)}m  ·  Util ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
+      `Util ${sheet.utilization}%  ·  Reusable ${reusablePct.toFixed(1)}%  ·  Trim ${trimPct.toFixed(1)}%  ·  ${sheet.blinds.length} pieces`,
       MARGIN, 44
     )
   } else {
@@ -65,8 +97,11 @@ function renderCutMap(
     )
     ctx.fillStyle = '#9aa3b8'
     ctx.font = '12px Inter, sans-serif'
+    const tailLabel = tailLength > 0
+      ? `  ·  +${tailLength.toFixed(2)}m tail saved as leftover (${tailArea.toFixed(2)}m²)`
+      : ''
     ctx.fillText(
-      `Utilization ${sheet.utilization}%  ·  Waste ${sheet.waste}%  ·  ${sheet.blinds.length} pieces`,
+      `Util ${sheet.utilization}%  ·  Reusable ${reusablePct.toFixed(1)}%  ·  Trim ${trimPct.toFixed(1)}%  ·  ${sheet.blinds.length} pieces${tailLabel}`,
       MARGIN, 44
     )
   }
@@ -145,25 +180,47 @@ function renderCutMap(
     }
   }
 
-  // Waste areas
+  // Waste areas — distinguish reusable (teal, saved as leftover) from trim (pink, true waste)
+  const reusableRects = sheet.reusable_leftovers || []
   for (const w of sheet.waste_areas) {
     const wx = MARGIN + (w.x + offX) * scale
     const wy = MARGIN + TOPBAR + (w.y + offY) * scale
     const ww = w.width * scale
     const wh = w.height * scale
-    ctx.fillStyle = 'rgba(239, 68, 68, 0.08)'
-    ctx.fillRect(wx, wy, ww, wh)
-    ctx.strokeStyle = '#fca5a5'
-    ctx.setLineDash([6, 4])
-    ctx.lineWidth = 1.2
-    ctx.strokeRect(wx, wy, ww, wh)
-    ctx.setLineDash([])
-    if (showLabels && ww > 35 && wh > 20) {
-      ctx.fillStyle = '#ef4444'
-      ctx.font = 'bold 10px Inter, sans-serif'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      ctx.fillText('WASTE', wx + ww / 2, wy + wh / 2)
+    const reusable = isReusableRect(w, reusableRects)
+    if (reusable) {
+      ctx.fillStyle = 'rgba(20, 184, 166, 0.12)'
+      ctx.fillRect(wx, wy, ww, wh)
+      ctx.strokeStyle = '#5eead4'
+      ctx.setLineDash([6, 4])
+      ctx.lineWidth = 1.2
+      ctx.strokeRect(wx, wy, ww, wh)
+      ctx.setLineDash([])
+      if (showLabels && ww > 50 && wh > 24) {
+        ctx.fillStyle = '#0d9488'
+        ctx.font = 'bold 10px Inter, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText('REUSABLE', wx + ww / 2, wy + wh / 2 - 5)
+        ctx.font = '9px Inter, sans-serif'
+        ctx.fillStyle = '#14b8a6'
+        ctx.fillText(`→ leftover`, wx + ww / 2, wy + wh / 2 + 7)
+      }
+    } else {
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.08)'
+      ctx.fillRect(wx, wy, ww, wh)
+      ctx.strokeStyle = '#fca5a5'
+      ctx.setLineDash([6, 4])
+      ctx.lineWidth = 1.2
+      ctx.strokeRect(wx, wy, ww, wh)
+      ctx.setLineDash([])
+      if (showLabels && ww > 35 && wh > 20) {
+        ctx.fillStyle = '#ef4444'
+        ctx.font = 'bold 10px Inter, sans-serif'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText('TRIM', wx + ww / 2, wy + wh / 2)
+      }
     }
   }
 
@@ -256,7 +313,7 @@ function renderCutMap(
 const MARGIN = 60
 const TOPBAR = 64
 
-export default function CutMapCanvas({ sheet }: Props) {
+export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [scale, setScale] = useState(140)
   const [showLabels, setShowLabels] = useState(true)
@@ -276,8 +333,8 @@ export default function CutMapCanvas({ sheet }: Props) {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    renderCutMap(ctx, sheet, scale, showLabels, showPrevious, MARGIN, TOPBAR)
-  }, [sheet, scale, showLabels, showPrevious, canvasWidth, canvasLength, offX, offY, hasPrevious, isLeftover])
+    renderCutMap(ctx, sheet, scale, showLabels, showPrevious, MARGIN, TOPBAR, maxRollLength)
+  }, [sheet, scale, showLabels, showPrevious, canvasWidth, canvasLength, offX, offY, hasPrevious, isLeftover, maxRollLength])
 
   // Standard PNG download — renders at 200px/m so it's always crisp regardless of zoom.
   const download = useCallback(() => {
@@ -285,12 +342,12 @@ export default function CutMapCanvas({ sheet }: Props) {
     const offscreen = document.createElement('canvas')
     const ctx = offscreen.getContext('2d')
     if (!ctx) return
-    renderCutMap(ctx, sheet, DL_SCALE, true, showPrevious, MARGIN, TOPBAR)
+    renderCutMap(ctx, sheet, DL_SCALE, true, showPrevious, MARGIN, TOPBAR, maxRollLength)
     const a = document.createElement('a')
     a.download = `sheet-${sheet.sheet_number}.png`
     a.href = offscreen.toDataURL('image/png')
     a.click()
-  }, [sheet, showPrevious])
+  }, [sheet, showPrevious, maxRollLength])
 
   // A3 PNG download — 1748×2480px (portrait, 150 DPI)
   const downloadA3 = useCallback(() => {
@@ -309,7 +366,7 @@ export default function CutMapCanvas({ sheet }: Props) {
     const inner = document.createElement('canvas')
     const innerCtx = inner.getContext('2d')
     if (!innerCtx) return
-    renderCutMap(innerCtx, sheet, a3Scale, true, showPrevious, MARGIN_A3, TOPBAR_A3)
+    renderCutMap(innerCtx, sheet, a3Scale, true, showPrevious, MARGIN_A3, TOPBAR_A3, maxRollLength)
     // inner.width may be narrower than A3_W_PX for narrow rolls — that's fine.
 
     // Step 2 — stamp inner canvas onto a proper 1748×2480 A3 canvas, centred.
@@ -338,8 +395,14 @@ export default function CutMapCanvas({ sheet }: Props) {
     ctx.font = 'bold 16px Inter, sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
+    const reusableA = (sheet.reusable_leftovers || []).reduce((s, r) => s + r.width * r.height, 0)
+    const totalWasteA = (sheet.waste_areas || []).reduce((s, w) => s + w.width * w.height, 0)
+    const trimA = Math.max(0, totalWasteA - reusableA)
+    const cutA = sheet.width * sheet.length
+    const reusablePctA = cutA > 0 ? (reusableA / cutA) * 100 : 0
+    const trimPctA = cutA > 0 ? (trimA / cutA) * 100 : 0
     ctx.fillText(
-      `OptiRoll  ·  Sheet #${sheet.sheet_number}  ·  Roll ${fmtRollWidth(sheet.width)} wide × ${sheet.length.toFixed(2)}m used  ·  Utilization ${sheet.utilization}%  ·  Waste ${sheet.waste}%`,
+      `OptiRoll  ·  Sheet #${sheet.sheet_number}  ·  Roll ${fmtRollWidth(sheet.width)} × ${sheet.length.toFixed(2)}m used  ·  Util ${sheet.utilization}%  ·  Reusable ${reusablePctA.toFixed(1)}%  ·  Trim ${trimPctA.toFixed(1)}%`,
       A3_W_PX / 2, A3_H_PX - FOOTER_H / 2 - 4
     )
 
@@ -347,7 +410,7 @@ export default function CutMapCanvas({ sheet }: Props) {
     a.download = `sheet-${sheet.sheet_number}-A3.png`
     a.href = a3.toDataURL('image/png')
     a.click()
-  }, [sheet, canvasWidth, canvasLength, showPrevious])
+  }, [sheet, canvasWidth, canvasLength, showPrevious, maxRollLength])
 
   return (
     <div className={`${fullscreen ? 'fixed inset-0 z-50 bg-surface-900/95 flex flex-col items-center justify-center p-4' : ''}`}>
@@ -393,7 +456,8 @@ export default function CutMapCanvas({ sheet }: Props) {
             <div className="flex flex-wrap gap-4 mt-3">
               <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-blue-600/80" /> Roller Blind</div>
               <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-purple-500/80" /> Zebra Blind</div>
-              <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-red-400/20 border border-red-300 border-dashed" /> Waste</div>
+              <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-teal-400/20 border border-teal-400 border-dashed" /> Reusable Leftover</div>
+              <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-red-400/20 border border-red-300 border-dashed" /> Trim (lost)</div>
               {hasPrevious && (
                 <div className="flex items-center gap-1.5 text-xs text-surface-500"><div className="w-3 h-3 rounded-sm bg-slate-400/20 border border-slate-400 border-dashed" /> Previous Cut</div>
               )}
