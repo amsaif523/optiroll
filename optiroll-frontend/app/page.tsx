@@ -15,7 +15,7 @@ import {
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList,
-  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles
+  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -438,6 +438,20 @@ export default function Home() {
 
               {/* RIGHT COLUMN */}
               <div className="xl:col-span-8 space-y-3">
+
+                {/* Smart suggestions: reads current items + settings and recommends tweaks */}
+                <SmartSuggestions
+                  items={items}
+                  optimizeMode={optimizeMode}
+                  cutMode={cutMode}
+                  allowRotation={allowRotation}
+                  leftoverThreshold={appSettings.leftover_reuse_threshold ?? 0.8}
+                  onApplyDeep={() => setOptimizeMode('deep')}
+                  onApplyRotation={() => setAllowRotation(true)}
+                  onLockGrain={(ids) => setItems(items.map(i => ids.includes(i.id) ? { ...i, grain_locked: true } : i))}
+                  onApplyThreshold={(v) => setAppSettings(s => ({ ...s, leftover_reuse_threshold: v }))}
+                />
+
                 {/* Generate buttons (Quick + Deep) + error — always at top of right column */}
                 <div className="space-y-2">
                   <div className="grid grid-cols-3 gap-2">
@@ -2051,6 +2065,143 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
           <button onClick={onClose} className="btn-brand px-6 py-2.5 text-sm font-semibold">Close</button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// Inline-recommends setting tweaks based on the current work order shape.
+// Suggestions only render when the recommendation differs from current state,
+// so the panel disappears once everything is dialled in.
+function SmartSuggestions({
+  items, optimizeMode, cutMode, allowRotation, leftoverThreshold,
+  onApplyDeep, onApplyRotation, onLockGrain, onApplyThreshold,
+}: {
+  items: WorkOrderItem[]
+  optimizeMode: 'quick' | 'deep'
+  cutMode: 'free' | 'guillotine'
+  allowRotation: boolean
+  leftoverThreshold: number
+  onApplyDeep: () => void
+  onApplyRotation: () => void
+  onLockGrain: (ids: string[]) => void
+  onApplyThreshold: (v: number) => void
+}) {
+  if (items.length === 0) return null
+
+  const PATTERN_HINT_RE = /strip|pattern|grain|floral|check|plaid|print/i
+
+  const totalQty = items.reduce((s, i) => s + i.quantity, 0)
+  const patternedUnlocked = items.filter(i =>
+    !i.grain_locked && PATTERN_HINT_RE.test(`${i.pattern} ${i.color}`)
+  )
+  const widths = items.flatMap(i => i.selected_widths)
+  const widthRange = widths.length > 0 ? Math.max(...widths) - Math.min(...widths) : 0
+  const bucketCount = new Set(items.map(i => `${i.material_type}|${i.color}|${i.pattern}`)).size
+
+  type Suggestion = {
+    key: string
+    icon: React.ReactNode
+    text: React.ReactNode
+    apply?: () => void
+    applyLabel?: string
+  }
+  const suggestions: Suggestion[] = []
+
+  // 1. Large/varied jobs benefit measurably from the GA
+  if (optimizeMode === 'quick' && (totalQty >= 20 || items.length >= 10)) {
+    suggestions.push({
+      key: 'deep',
+      icon: <Sparkles size={13} className="text-purple-600" />,
+      text: <>
+        <strong>{totalQty} pieces</strong> across {items.length} lines —
+        Deep mode usually saves <strong>5–10%</strong> more material here.
+      </>,
+      apply: onApplyDeep,
+      applyLabel: 'Use Deep',
+    })
+  }
+
+  // 2. Patterned/striped fabric should be grain-locked so the optimiser won't rotate it
+  if (patternedUnlocked.length > 0) {
+    const names = patternedUnlocked.map(i => i.shade_number || '?').join(', ')
+    suggestions.push({
+      key: 'grain',
+      icon: <Lock size={13} className="text-amber-600" />,
+      text: <>
+        Patterned fabric detected on <strong>{patternedUnlocked.length} piece(s)</strong>: {names}.
+        Grain-lock so rotation won&apos;t misalign the print.
+      </>,
+      apply: () => onLockGrain(patternedUnlocked.map(p => p.id)),
+      applyLabel: 'Lock grain',
+    })
+  }
+
+  // 3. Rotation off + no grain-locks = leaving free density on the table
+  if (!allowRotation && patternedUnlocked.length === 0 && items.every(i => !i.grain_locked)) {
+    suggestions.push({
+      key: 'rotation',
+      icon: <RotateCcw size={13} className="text-emerald-600" />,
+      text: <>No grain-locked pieces — enabling <strong>90° rotation</strong> lets the optimiser flip pieces to fit better.</>,
+      apply: onApplyRotation,
+      applyLabel: 'Allow rotation',
+    })
+  }
+
+  // 4. Wide width range = narrow leftovers may help; current threshold too strict
+  if (widthRange >= 0.5 && leftoverThreshold >= 0.75) {
+    suggestions.push({
+      key: 'threshold',
+      icon: <Recycle size={13} className="text-blue-600" />,
+      text: <>Mixed roll-width job ({widthRange.toFixed(1)}m spread). Lowering the leftover threshold to <strong>60%</strong> typically reuses more offcuts.</>,
+      apply: () => onApplyThreshold(0.6),
+      applyLabel: 'Set 60%',
+    })
+  }
+
+  // 5. Many distinct material/colour/pattern buckets — informational only
+  if (bucketCount >= 3) {
+    suggestions.push({
+      key: 'buckets',
+      icon: <Package size={13} className="text-surface-500" />,
+      text: <><strong>{bucketCount} material/colour groups</strong> — each runs as its own packing pass automatically. Cross-group merging applies within each group.</>,
+    })
+  }
+
+  // 6. Cut mode is a shop-floor decision we can only inform on
+  if (cutMode === 'free') {
+    suggestions.push({
+      key: 'cutmode',
+      icon: <Scissors size={13} className="text-amber-600" />,
+      text: <><strong>Free cut mode</strong> gives best density but may need non-straight cuts. Switch to Guillotine if your machine only does straight cross-cuts.</>,
+    })
+  }
+
+  if (suggestions.length === 0) return null
+
+  return (
+    <div className="bg-gradient-to-br from-amber-50 to-yellow-50 border border-amber-200 rounded-xl p-3 space-y-2 shadow-sm">
+      <div className="flex items-center gap-2">
+        <Lightbulb size={14} className="text-amber-600" />
+        <span className="text-[11px] font-bold text-amber-800 uppercase tracking-wider">
+          Smart Suggestions · {suggestions.length}
+        </span>
+      </div>
+      <ul className="space-y-1.5">
+        {suggestions.map(s => (
+          <li key={s.key} className="flex items-start gap-2 text-[12px] text-surface-700 leading-relaxed">
+            <span className="mt-0.5 shrink-0">{s.icon}</span>
+            <span className="flex-1">{s.text}</span>
+            {s.apply && (
+              <button
+                onClick={s.apply}
+                className="shrink-0 px-2 py-0.5 rounded-md bg-white border border-amber-300 text-[11px] font-bold text-amber-700 hover:bg-amber-100 transition-colors"
+              >
+                {s.applyLabel}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
