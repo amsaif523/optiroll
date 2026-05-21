@@ -12,6 +12,57 @@ interface Props {
 
 const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
+// Word-wrap `text` to fit within `maxWidth` px on the current canvas context.
+// Breaks on whitespace first; if a single word is itself longer than maxWidth,
+// splits it character-by-character so it still fits. Returns the resulting lines.
+function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  if (!text) return []
+  const words = text.split(/\s+/).filter(Boolean)
+  const lines: string[] = []
+  let current = ''
+  const pushBrokenWord = (word: string) => {
+    let buf = ''
+    for (const ch of word) {
+      const cand = buf + ch
+      if (ctx.measureText(cand).width <= maxWidth) {
+        buf = cand
+      } else {
+        if (buf) lines.push(buf)
+        buf = ch
+      }
+    }
+    if (buf) current = buf
+  }
+  for (const word of words) {
+    const candidate = current ? current + ' ' + word : word
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      current = candidate
+    } else {
+      if (current) { lines.push(current); current = '' }
+      if (ctx.measureText(word).width <= maxWidth) {
+        current = word
+      } else {
+        pushBrokenWord(word)
+      }
+    }
+  }
+  if (current) lines.push(current)
+  return lines
+}
+
+// Truncate `text` with an ellipsis so it fits within `maxWidth` on the current ctx.
+function ellipsize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (!text || ctx.measureText(text).width <= maxWidth) return text
+  const ellipsis = '…'
+  let lo = 0, hi = text.length
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (ctx.measureText(text.slice(0, mid) + ellipsis).width <= maxWidth) lo = mid
+    else hi = mid - 1
+  }
+  return text.slice(0, lo) + ellipsis
+}
+
 // Returns true when a waste rectangle qualifies as a reusable leftover
 // (matches one of the rects the optimiser saved back to inventory).
 function isReusableRect(
@@ -246,19 +297,36 @@ function renderCutMap(
       const wLabel    = `${(b.width * M_TO_IN).toFixed(5)}"`
 
       const fs = Math.min(12, Math.max(7, bw / 10))
+      const PAD = 6  // px padding inside the rectangle for text
+      const textMaxWidth = Math.max(10, bw - PAD * 2)
+
+      // Clip every label to the piece's rectangle so long shade names can never
+      // bleed outside its bounds — wrapping handles the in-bounds layout below.
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(bx, by, bw, bh)
+      ctx.clip()
+
       ctx.fillStyle = '#ffffff'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
 
       if (bh > 80 && bw > 60) {
-        let lineCount = 1 + (b.shade_number ? 1 : 0) + (valenceIn ? 1 : 0) + (b.rotated ? 1 : 0)
-        let lineY = by + bh / 2 - (lineCount / 2) * (fs + 3)
+        const shadeFs = Math.min(fs + 1, 13)
+        ctx.font = `bold ${shadeFs}px Inter, sans-serif`
+        const shadeLines = b.shade_number ? wrapText(ctx, b.shade_number, textMaxWidth) : []
 
-        if (b.shade_number) {
-          ctx.font = `bold ${Math.min(fs + 1, 13)}px Inter, sans-serif`
+        const lineCount = shadeLines.length + 1 + 1 + (valenceIn ? 1 : 0) + (b.rotated ? 1 : 0)
+        let lineY = by + bh / 2 - ((lineCount - 1) / 2) * (fs + 3)
+
+        if (shadeLines.length > 0) {
+          ctx.font = `bold ${shadeFs}px Inter, sans-serif`
           ctx.fillStyle = '#ffffff'
-          ctx.fillText(b.shade_number, bx + bw / 2, lineY)
-          lineY += fs + 4
+          for (const line of shadeLines) {
+            ctx.fillText(line, bx + bw / 2, lineY)
+            lineY += shadeFs + 2
+          }
+          lineY += 2  // small gap after the shade block
         }
 
         ctx.font = `bold ${fs}px Inter, sans-serif`
@@ -287,15 +355,22 @@ function renderCutMap(
         ctx.font = `bold ${fs}px Inter, sans-serif`
         ctx.fillStyle = '#ffffff'
         const dimLine = `${wLabel} × ${cutLen}"`
-        ctx.fillText(b.shade_number || dimLine, bx + bw / 2, by + bh / 2 - fs / 2 - 2)
+        const shadeText = b.shade_number
+          ? ellipsize(ctx, b.shade_number, textMaxWidth)
+          : ellipsize(ctx, dimLine, textMaxWidth)
+        ctx.fillText(shadeText, bx + bw / 2, by + bh / 2 - fs / 2 - 2)
         ctx.font = `${fs - 1}px Inter, sans-serif`
         ctx.fillStyle = 'rgba(255,255,255,0.8)'
-        ctx.fillText(b.shade_number ? dimLine : typeLabel, bx + bw / 2, by + bh / 2 + fs / 2 + 2)
+        const subText = b.shade_number ? dimLine : typeLabel
+        ctx.fillText(ellipsize(ctx, subText, textMaxWidth), bx + bw / 2, by + bh / 2 + fs / 2 + 2)
       } else if (bh > 18 || bw > 30) {
         ctx.font = `bold ${Math.max(fs - 1, 7)}px Inter, sans-serif`
         ctx.fillStyle = '#ffffff'
-        ctx.fillText(b.shade_number || typeLabel, bx + bw / 2, by + bh / 2)
+        const text = b.shade_number || typeLabel
+        ctx.fillText(ellipsize(ctx, text, textMaxWidth), bx + bw / 2, by + bh / 2)
       }
+
+      ctx.restore()
     }
   }
 
