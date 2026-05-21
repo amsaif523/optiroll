@@ -146,11 +146,14 @@ export default function WorkOrderBuilder({
         const dataRows = rows.slice(headerIdx + 1)
 
         // Initial mapping — best-guess column for each field by header keyword.
+        // Iterates keywords in priority order so e.g. a "Shade #" column always
+        // wins over a "Sr No." fallback, even when "Sr No." appears first in the row.
         const findCol = (...keywords: string[]): number | undefined => {
-          for (let i = 0; i < headerCells.length; i++) {
-            const h = headerCells[i].toLowerCase()
-            if (!h) continue
-            if (keywords.some(k => h.includes(k))) return i
+          for (const k of keywords) {
+            for (let i = 0; i < headerCells.length; i++) {
+              const h = headerCells[i].toLowerCase()
+              if (h && h.includes(k)) return i
+            }
           }
           return undefined
         }
