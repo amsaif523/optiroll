@@ -227,7 +227,7 @@ export default function WorkOrderBuilder({
             <Upload size={13} /> Import Excel
           </button>
           <a
-            href="/optiroll-import-template.csv"
+            href="/optiroll-import-template.xlsx"
             download
             title="Download CSV template"
             className="flex items-center gap-1.5 py-2 px-3 rounded-lg border border-surface-200 bg-white text-surface-500 text-xs font-bold hover:bg-surface-50 transition-colors"
