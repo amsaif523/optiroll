@@ -621,6 +621,11 @@ class Optimizer {
     const keyOf = (b) => `${b.id}|${b.piece_index}`;
 
     const evaluate = (chromosome) => {
+      // Defensive: reject malformed chromosomes (wrong length or contains holes)
+      // — scoring them as Infinity lets the GA discard them naturally.
+      if (!Array.isArray(chromosome) || chromosome.length !== N || chromosome.some(c => c == null)) {
+        return Infinity;
+      }
       const saved = this.blindQueue;
       this.blindQueue = [...chromosome];
       let totalLength = 0;
@@ -652,6 +657,11 @@ class Optimizer {
 
     // Order Crossover (OX1): preserve a slice from p1, fill remainder with p2's order
     const crossover = (p1, p2) => {
+      // If either parent is malformed (undefined, wrong length, has holes), bail
+      // to a fresh shuffle. Keeps a single bad chromosome from corrupting newPop.
+      const valid = (p) => Array.isArray(p) && p.length === N && p.every(x => x != null);
+      if (!valid(p1) || !valid(p2)) return shuffle(queue);
+
       const start = Math.floor(Math.random() * N);
       const end = start + Math.floor(Math.random() * (N - start));
       const slice = p1.slice(start, end + 1);
@@ -664,6 +674,9 @@ class Optimizer {
         if (i >= start && i <= end) continue;
         child[i] = fill[fillIdx++];
       }
+      // If the OX1 math didn't produce a full permutation (e.g. duplicate keys
+      // shrunk `fill`), fall back to a shuffle rather than return a holed child.
+      if (child.some(x => x == null)) return shuffle(queue);
       return child;
     };
 
@@ -699,6 +712,10 @@ class Optimizer {
         const idx = Math.floor(Math.random() * population.length);
         if (scores[idx] < winnerScore) { winner = idx; winnerScore = scores[idx]; }
       }
+      // If every sampled chromosome scored Infinity, no `<` ever fires and
+      // winner stays -1 → population[-1] is undefined and crashes downstream.
+      // Fall back to a random valid member so the GA can still progress.
+      if (winner === -1) winner = Math.floor(Math.random() * population.length);
       return population[winner];
     };
 
@@ -830,7 +847,9 @@ class Optimizer {
 
     for (const heuristic of HEURISTICS) {
       for (const sortFn of SORT_FNS) {
-        const candidates = [...this.blindQueue].sort(sortFn);
+        // Filter out any holes — defensive guard so a malformed GA chromosome
+        // can never crash the packer at `blind.width`.
+        const candidates = [...this.blindQueue].filter(b => b != null).sort(sortFn);
         const bin = mode === 'guillotine' ? new ShelfPacker(width, length) : new MaxRects(width, length);
         const placed = [];
 
