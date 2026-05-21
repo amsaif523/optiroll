@@ -115,52 +115,104 @@ export default function WorkOrderBuilder({
         const ws = wb.Sheets[wb.SheetNames[0]]
         const rows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
 
-        if (rows.length < 2) {
-          alert('The file has no data rows (expected at least a header row + 1 data row).')
+        if (rows.length === 0) {
+          alert('The file is empty.')
           return
         }
+
+        // Auto-detect the header row: scan the first 25 rows for one that has cells
+        // matching both "width" and "height". This lets us tolerate vendor preamble
+        // (A/c name, date, Vch No, blank spacers) before the real table starts.
+        const norm = (s: unknown) => String(s ?? '').toLowerCase().trim()
+        let headerIdx = -1
+        for (let i = 0; i < Math.min(rows.length, 25); i++) {
+          const cells = rows[i].map(norm)
+          const hasW = cells.some(c => /(^|\s|\()width(\s|$|\(|"|\))/.test(c) || c === 'w' || c === 'w (")' || c.startsWith('width'))
+          const hasH = cells.some(c => /(^|\s|\()height(\s|$|\(|"|\))/.test(c) || c === 'h' || c === 'h (")' || c.startsWith('height'))
+          if (hasW && hasH) { headerIdx = i; break }
+        }
+        if (headerIdx === -1) {
+          alert('Could not find a header row. The file must contain a row with both "Width" and "Height" columns.')
+          return
+        }
+
+        const headerCells = (rows[headerIdx] as unknown[]).map(c => String(c ?? '').trim())
+
+        // Find a column index by keyword (substring match against the lower-cased header).
+        // The first keyword that matches wins, so put the most specific keyword first.
+        const findCol = (...keywords: string[]): number => {
+          for (let i = 0; i < headerCells.length; i++) {
+            const h = headerCells[i].toLowerCase()
+            if (!h) continue
+            if (keywords.some(k => h.includes(k))) return i
+          }
+          return -1
+        }
+
+        // Width must NOT match "Roll Widths" — handle it specially.
+        let widthCol = -1
+        for (let i = 0; i < headerCells.length; i++) {
+          const h = headerCells[i].toLowerCase()
+          if ((h.includes('width') || h === 'w' || h.startsWith('w (')) && !h.includes('roll')) { widthCol = i; break }
+        }
+
+        const col = {
+          shade:    findCol('shade'),
+          type:     findCol('type', 'blind type'),
+          width:    widthCol,
+          height:   findCol('height'),
+          valence:  findCol('valence', 'val ('),
+          qty:      findCol('qty', 'quantity'),
+          material: findCol('material'),
+          color:    findCol('color', 'colour'),
+          pattern:  findCol('pattern'),
+          widths:   findCol('roll widths', 'roll width'),
+          grain:    findCol('grain'),
+        }
+
+        if (col.shade  === -1) { alert('Missing required column: "Shade #".'); return }
+        if (col.width  === -1) { alert('Missing required column: "Width".'); return }
+        if (col.height === -1) { alert('Missing required column: "Height".'); return }
 
         const newItems: WorkOrderItem[] = []
         const skipped: { row: number; reason: string }[] = []
 
-        // rows[0] is header, data starts at rows[1]
-        for (let i = 1; i < rows.length; i++) {
-          const r = rows[i] as string[]
+        for (let i = headerIdx + 1; i < rows.length; i++) {
+          const r = rows[i] as unknown[]
           const rowNum = i + 1
 
-          // Skip completely empty rows
-          if (r.every(cell => String(cell).trim() === '')) continue
+          // Skip completely empty rows (vendor files often have blank spacer rows between items).
+          if (r.every(cell => String(cell ?? '').trim() === '')) continue
 
-          const shadeRaw    = String(r[0] ?? '').trim()
-          const typeRaw     = String(r[1] ?? '').trim().toLowerCase()
-          const widthRaw    = parseFloat(String(r[2] ?? ''))
-          const heightRaw   = parseFloat(String(r[3] ?? ''))
-          const valenceRaw  = parseFloat(String(r[4] ?? ''))
-          const qtyRaw      = parseInt(String(r[5] ?? ''), 10)
-          const materialRaw = String(r[6] ?? '').trim() || 'Polyester'
-          const colorRaw    = String(r[7] ?? '').trim() || 'White'
-          const patternRaw  = String(r[8] ?? '').trim() || 'Plain'
-          const widthsRaw   = String(r[9] ?? '').trim()
-          const grainRaw    = String(r[10] ?? '').trim().toLowerCase()
+          const widthRaw  = parseFloat(String(r[col.width]  ?? ''))
+          const heightRaw = parseFloat(String(r[col.height] ?? ''))
+
+          // Silently skip footer / totals / tax rows (GST, Rounding Off, Total, Narration...)
+          // — any row where width or height isn't a positive number.
+          if (isNaN(widthRaw) || widthRaw <= 0 || isNaN(heightRaw) || heightRaw <= 0) continue
+
+          const shadeRaw = String(r[col.shade] ?? '').trim()
+          if (!shadeRaw) { skipped.push({ row: rowNum, reason: 'Missing Shade #' }); continue }
+
+          const typeRaw = col.type >= 0 ? String(r[col.type] ?? '').trim().toLowerCase() : ''
+          const blindType: 'roller' | 'zebra' = typeRaw === 'zebra' ? 'zebra' : 'roller'
+
+          // Valence default = 6 inches when blank or missing column.
+          const valenceCell = col.valence >= 0 ? String(r[col.valence] ?? '').trim() : ''
+          const valenceParsed = parseFloat(valenceCell)
+          const valenceIn = valenceCell === '' || isNaN(valenceParsed) ? 6 : valenceParsed
+
+          const qtyParsed = col.qty >= 0 ? parseInt(String(r[col.qty] ?? ''), 10) : NaN
+          const qty = isNaN(qtyParsed) || qtyParsed < 1 ? 1 : qtyParsed
+
+          const materialRaw = (col.material >= 0 ? String(r[col.material] ?? '').trim() : '') || 'Polyester'
+          const colorRaw    = (col.color    >= 0 ? String(r[col.color]    ?? '').trim() : '') || 'White'
+          const patternRaw  = (col.pattern  >= 0 ? String(r[col.pattern]  ?? '').trim() : '') || 'Plain'
+          const widthsRaw   = col.widths >= 0 ? String(r[col.widths] ?? '').trim() : ''
+          const grainRaw    = col.grain  >= 0 ? String(r[col.grain]  ?? '').trim().toLowerCase() : ''
           const grainLocked = grainRaw === 'yes' || grainRaw === 'true' || grainRaw === '1' || grainRaw === 'locked'
 
-          if (!shadeRaw) { skipped.push({ row: rowNum, reason: 'Missing Shade #' }); continue }
-          if (typeRaw !== 'roller' && typeRaw !== 'zebra') {
-            skipped.push({ row: rowNum, reason: `Type must be "roller" or "zebra", got "${r[1]}"` }); continue
-          }
-          if (isNaN(widthRaw) || widthRaw <= 0) {
-            skipped.push({ row: rowNum, reason: 'Width must be a positive number' }); continue
-          }
-          if (isNaN(heightRaw) || heightRaw <= 0) {
-            skipped.push({ row: rowNum, reason: 'Height must be a positive number' }); continue
-          }
-          if (isNaN(qtyRaw) || qtyRaw < 1) {
-            skipped.push({ row: rowNum, reason: 'Qty must be a whole number ≥ 1' }); continue
-          }
-
-          const valenceIn = isNaN(valenceRaw) ? 6 : valenceRaw
-
-          // Parse roll widths
+          // Parse roll widths — empty / missing / "all" → use every configured width.
           let selectedWidths: number[]
           if (!widthsRaw || widthsRaw.toLowerCase() === 'all') {
             selectedWidths = [...availableWidths]
@@ -182,7 +234,7 @@ export default function WorkOrderBuilder({
           const widthM   = widthRaw  * IN_TO_M
           const heightM  = heightRaw * IN_TO_M
           const valenceM = valenceIn * IN_TO_M
-          const finalHeightM = typeRaw === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
+          const finalHeightM = blindType === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
           const maxW = Math.max(...selectedWidths)
 
           if (widthM > maxW && !(allowRotation && finalHeightM <= maxW)) {
@@ -196,11 +248,11 @@ export default function WorkOrderBuilder({
           newItems.push({
             id: crypto.randomUUID(),
             shade_number:    shadeRaw,
-            blind_type:      typeRaw as 'roller' | 'zebra',
+            blind_type:      blindType,
             width:           widthM,
             height:          heightM,
             valence:         valenceM,
-            quantity:        qtyRaw,
+            quantity:        qty,
             material_type:   materialRaw,
             color:           colorRaw,
             pattern:         patternRaw,
@@ -214,7 +266,7 @@ export default function WorkOrderBuilder({
         }
         setImportResult({ imported: newItems.length, skipped })
       } catch {
-        alert('Failed to read the file. Make sure it is a valid .xlsx or .xls file.')
+        alert('Failed to read the file. Make sure it is a valid .xlsx, .xls, or .csv file.')
       }
     }
     reader.readAsArrayBuffer(file)
