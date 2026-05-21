@@ -9,18 +9,19 @@ import { WorkOrderItem, OptimizeResponse, AppSettings, Sheet } from '@/types'
 import WorkOrderBuilder from '@/components/WorkOrderBuilder'
 import CutMapCanvas from '@/components/CutMapCanvas'
 import SettingsPanel from '@/components/SettingsPanel'
+import GuideView from '@/components/GuideView'
 import { getToken, getUser, clearToken, getInitials, AuthUser } from '@/lib/auth'
 import {
   Scissors, Loader2, AlertCircle, FileText, BarChart3, CheckCircle2,
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList,
-  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock
+  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
 
-type ActiveTab = 'dashboard' | 'workorder' | 'jobs' | 'leftovers' | 'activity' | 'users' | 'settings'
+type ActiveTab = 'dashboard' | 'workorder' | 'jobs' | 'leftovers' | 'activity' | 'users' | 'guide' | 'settings'
 
 interface PagedResponse<T> {
   rows: T[]
@@ -264,6 +265,7 @@ export default function Home() {
     { icon: <Recycle size={18} />, label: 'Leftovers', tab: 'leftovers' as ActiveTab },
     { icon: <History size={18} />, label: 'Activity', tab: 'activity' as ActiveTab },
     { icon: <Users size={18} />, label: 'Users', tab: 'users' as ActiveTab },
+    { icon: <BookOpen size={18} />, label: 'User Guide', tab: 'guide' as ActiveTab },
     { icon: <Settings size={18} />, label: 'Settings', tab: 'settings' as ActiveTab },
   ]
 
@@ -390,6 +392,8 @@ export default function Home() {
             <ActivityView user={user} />
           ) : activeTab === 'users' ? (
             <UsersView user={user} />
+          ) : activeTab === 'guide' ? (
+            <GuideView />
           ) : activeTab === 'workorder' ? (
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
 
