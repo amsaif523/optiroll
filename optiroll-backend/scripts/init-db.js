@@ -92,7 +92,7 @@ const initDB = async () => {
     CREATE TABLE IF NOT EXISTS job_items (
       id INT AUTO_INCREMENT PRIMARY KEY,
       job_id INT NOT NULL,
-      shade_number VARCHAR(50),
+      shade_number VARCHAR(255),
       blind_type ENUM('roller','zebra') NOT NULL,
       width DECIMAL(5,2) NOT NULL,
       height DECIMAL(5,2) NOT NULL,
@@ -121,6 +121,14 @@ const initDB = async () => {
   };
   await addColumnIfMissing('job_items', 'selected_widths', 'JSON NULL AFTER pattern');
   await addColumnIfMissing('job_items', 'grain_locked', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER selected_widths');
+  // Widen shade_number — earlier installs capped at VARCHAR(50), which
+  // overflowed when users mapped Shade # to a long Product Name column.
+  try {
+    await connection.query(`ALTER TABLE job_items MODIFY COLUMN shade_number VARCHAR(255)`);
+    console.log('Widened column job_items.shade_number to VARCHAR(255)');
+  } catch (err) {
+    if (err.code !== 'ER_BAD_FIELD_ERROR') throw err;
+  }
 
   await connection.query(`
     CREATE TABLE IF NOT EXISTS optimization_results (

@@ -368,6 +368,12 @@ export default function GuideView() {
 
           {/* Tips */}
           <Card id="tips" icon={<Lightbulb size={16} />} title="Tips & Common Issues">
+            <Callout type="warn" title='"Why are 3 pieces using 3 sheets?"'>
+              Each unique <b>Material + Colour + Pattern</b> combination becomes its own sheet — different fabrics
+              physically can&apos;t be cut from the same roll. If your three pieces are <i>Polyester / White</i>,
+              <i>Polyester / Beige</i>, and <i>Blackout / Grey</i>, the optimizer must use three sheets even if
+              they would fit dimensionally. To consolidate, give the pieces the same fabric values.
+            </Callout>
             <Callout type="tip" title="Group like with like">
               Pieces with the same material / colour / pattern share sheets and pack much better. Avoid splitting
               a fabric across two work orders if you can run them as one.
