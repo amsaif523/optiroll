@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
 import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors, Lock } from 'lucide-react'
+import ImportPreviewModal, { FieldKey } from './ImportPreviewModal'
 
 const IN_TO_M = 0.0254
 const fmtDim = (v: number) => v.toFixed(5)
@@ -45,6 +46,12 @@ export default function WorkOrderBuilder({
   })
 
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
+  const [importPreview, setImportPreview] = useState<{
+    fileName: string
+    headerCells: string[]
+    dataRows: unknown[][]
+    initialMapping: Partial<Record<FieldKey, number>>
+  } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const toggleWidth = (w: number) => {
@@ -120,15 +127,14 @@ export default function WorkOrderBuilder({
           return
         }
 
-        // Auto-detect the header row: scan the first 25 rows for one that has cells
-        // matching both "width" and "height". This lets us tolerate vendor preamble
-        // (A/c name, date, Vch No, blank spacers) before the real table starts.
-        const norm = (s: unknown) => String(s ?? '').toLowerCase().trim()
+        // Auto-detect the header row: scan the first 25 rows for one containing
+        // both a "width" and "height" cell. Tolerates vendor preamble (A/c name,
+        // date, Vch No, blank spacer rows) before the real table.
         let headerIdx = -1
         for (let i = 0; i < Math.min(rows.length, 25); i++) {
-          const cells = rows[i].map(norm)
-          const hasW = cells.some(c => /(^|\s|\()width(\s|$|\(|"|\))/.test(c) || c === 'w' || c === 'w (")' || c.startsWith('width'))
-          const hasH = cells.some(c => /(^|\s|\()height(\s|$|\(|"|\))/.test(c) || c === 'h' || c === 'h (")' || c.startsWith('height'))
+          const cells = rows[i].map(c => String(c ?? '').toLowerCase().trim())
+          const hasW = cells.some(c => (c.includes('width') && !c.includes('roll')) || c === 'w' || c.startsWith('w ('))
+          const hasH = cells.some(c => c.includes('height') || c === 'h' || c.startsWith('h ('))
           if (hasW && hasH) { headerIdx = i; break }
         }
         if (headerIdx === -1) {
@@ -137,139 +143,59 @@ export default function WorkOrderBuilder({
         }
 
         const headerCells = (rows[headerIdx] as unknown[]).map(c => String(c ?? '').trim())
+        const dataRows = rows.slice(headerIdx + 1)
 
-        // Find a column index by keyword (substring match against the lower-cased header).
-        // The first keyword that matches wins, so put the most specific keyword first.
-        const findCol = (...keywords: string[]): number => {
+        // Initial mapping — best-guess column for each field by header keyword.
+        const findCol = (...keywords: string[]): number | undefined => {
           for (let i = 0; i < headerCells.length; i++) {
             const h = headerCells[i].toLowerCase()
             if (!h) continue
             if (keywords.some(k => h.includes(k))) return i
           }
-          return -1
+          return undefined
         }
 
-        // Width must NOT match "Roll Widths" — handle it specially.
-        let widthCol = -1
+        // Width must NOT match "Roll Widths".
+        let widthCol: number | undefined
         for (let i = 0; i < headerCells.length; i++) {
           const h = headerCells[i].toLowerCase()
           if ((h.includes('width') || h === 'w' || h.startsWith('w (')) && !h.includes('roll')) { widthCol = i; break }
         }
 
-        const col = {
-          shade:    findCol('shade'),
-          type:     findCol('type', 'blind type'),
-          width:    widthCol,
-          height:   findCol('height'),
-          valence:  findCol('valence', 'val ('),
-          qty:      findCol('qty', 'quantity'),
-          material: findCol('material'),
-          color:    findCol('color', 'colour'),
-          pattern:  findCol('pattern'),
-          widths:   findCol('roll widths', 'roll width'),
-          grain:    findCol('grain'),
-        }
+        const initial: Partial<Record<FieldKey, number>> = {}
+        const shade    = findCol('shade', 'sr no', 'sr.', 's.no', 'sl no', 'sno')
+        if (shade    !== undefined) initial.shade = shade
+        const type     = findCol('type', 'blind type')
+        if (type     !== undefined) initial.type = type
+        if (widthCol !== undefined) initial.width = widthCol
+        const height   = findCol('height')
+        if (height   !== undefined) initial.height = height
+        const valence  = findCol('valence', 'val (')
+        if (valence  !== undefined) initial.valence = valence
+        // Pcs preferred over Qty/Quantity — for vendor quotes "Quantity" is often the SQFT total.
+        const qty      = findCol('pcs', 'qty', 'quantity')
+        if (qty      !== undefined) initial.qty = qty
+        const material = findCol('material')
+        if (material !== undefined) initial.material = material
+        const color    = findCol('color', 'colour')
+        if (color    !== undefined) initial.color = color
+        const pattern  = findCol('pattern')
+        if (pattern  !== undefined) initial.pattern = pattern
+        const widths   = findCol('roll widths', 'roll width')
+        if (widths   !== undefined) initial.widths = widths
 
-        if (col.shade  === -1) { alert('Missing required column: "Shade #".'); return }
-        if (col.width  === -1) { alert('Missing required column: "Width".'); return }
-        if (col.height === -1) { alert('Missing required column: "Height".'); return }
-
-        const newItems: WorkOrderItem[] = []
-        const skipped: { row: number; reason: string }[] = []
-
-        for (let i = headerIdx + 1; i < rows.length; i++) {
-          const r = rows[i] as unknown[]
-          const rowNum = i + 1
-
-          // Skip completely empty rows (vendor files often have blank spacer rows between items).
-          if (r.every(cell => String(cell ?? '').trim() === '')) continue
-
-          const widthRaw  = parseFloat(String(r[col.width]  ?? ''))
-          const heightRaw = parseFloat(String(r[col.height] ?? ''))
-
-          // Silently skip footer / totals / tax rows (GST, Rounding Off, Total, Narration...)
-          // — any row where width or height isn't a positive number.
-          if (isNaN(widthRaw) || widthRaw <= 0 || isNaN(heightRaw) || heightRaw <= 0) continue
-
-          const shadeRaw = String(r[col.shade] ?? '').trim()
-          if (!shadeRaw) { skipped.push({ row: rowNum, reason: 'Missing Shade #' }); continue }
-
-          const typeRaw = col.type >= 0 ? String(r[col.type] ?? '').trim().toLowerCase() : ''
-          const blindType: 'roller' | 'zebra' = typeRaw === 'zebra' ? 'zebra' : 'roller'
-
-          // Valence default = 6 inches when blank or missing column.
-          const valenceCell = col.valence >= 0 ? String(r[col.valence] ?? '').trim() : ''
-          const valenceParsed = parseFloat(valenceCell)
-          const valenceIn = valenceCell === '' || isNaN(valenceParsed) ? 6 : valenceParsed
-
-          const qtyParsed = col.qty >= 0 ? parseInt(String(r[col.qty] ?? ''), 10) : NaN
-          const qty = isNaN(qtyParsed) || qtyParsed < 1 ? 1 : qtyParsed
-
-          const materialRaw = (col.material >= 0 ? String(r[col.material] ?? '').trim() : '') || 'Polyester'
-          const colorRaw    = (col.color    >= 0 ? String(r[col.color]    ?? '').trim() : '') || 'White'
-          const patternRaw  = (col.pattern  >= 0 ? String(r[col.pattern]  ?? '').trim() : '') || 'Plain'
-          const widthsRaw   = col.widths >= 0 ? String(r[col.widths] ?? '').trim() : ''
-          const grainRaw    = col.grain  >= 0 ? String(r[col.grain]  ?? '').trim().toLowerCase() : ''
-          const grainLocked = grainRaw === 'yes' || grainRaw === 'true' || grainRaw === '1' || grainRaw === 'locked'
-
-          // Parse roll widths — empty / missing / "all" → use every configured width.
-          let selectedWidths: number[]
-          if (!widthsRaw || widthsRaw.toLowerCase() === 'all') {
-            selectedWidths = [...availableWidths]
-          } else {
-            const parsed = widthsRaw.split(',').map(s => parseFloat(s.trim())).filter(v => !isNaN(v) && v > 0)
-            // Match against available widths (within 1mm tolerance)
-            selectedWidths = parsed
-              .map(v => availableWidths.find(aw => Math.abs(aw - v) < 0.001))
-              .filter((v): v is number => v !== undefined)
-          }
-
-          if (selectedWidths.length === 0) {
-            if (availableWidths.length === 0) {
-              skipped.push({ row: rowNum, reason: 'No roll widths configured in Settings' }); continue
-            }
-            skipped.push({ row: rowNum, reason: `Roll width(s) "${widthsRaw}" not found in configured widths` }); continue
-          }
-
-          const widthM   = widthRaw  * IN_TO_M
-          const heightM  = heightRaw * IN_TO_M
-          const valenceM = valenceIn * IN_TO_M
-          const finalHeightM = blindType === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
-          const maxW = Math.max(...selectedWidths)
-
-          if (widthM > maxW && !(allowRotation && finalHeightM <= maxW)) {
-            skipped.push({
-              row: rowNum,
-              reason: `Piece ${widthRaw}" wide won't fit on selected roll widths (max ${fmtRollWidth(maxW)})`,
-            })
-            continue
-          }
-
-          newItems.push({
-            id: crypto.randomUUID(),
-            shade_number:    shadeRaw,
-            blind_type:      blindType,
-            width:           widthM,
-            height:          heightM,
-            valence:         valenceM,
-            quantity:        qty,
-            material_type:   materialRaw,
-            color:           colorRaw,
-            pattern:         patternRaw,
-            selected_widths: selectedWidths,
-            grain_locked:    grainLocked,
-          })
-        }
-
-        if (newItems.length > 0) {
-          onChange([...items, ...newItems])
-        }
-        setImportResult({ imported: newItems.length, skipped })
+        setImportPreview({ fileName: file.name, headerCells, dataRows, initialMapping: initial })
       } catch {
         alert('Failed to read the file. Make sure it is a valid .xlsx, .xls, or .csv file.')
       }
     }
     reader.readAsArrayBuffer(file)
+  }
+
+  const handleConfirmImport = (newItems: WorkOrderItem[]) => {
+    if (newItems.length > 0) onChange([...items, ...newItems])
+    setImportResult({ imported: newItems.length, skipped: [] })
+    setImportPreview(null)
   }
 
   const finalHDisplay = (() => {
@@ -555,6 +481,19 @@ export default function WorkOrderBuilder({
           <Plus size={16} /> Add Piece to Order
         </button>
       </div>
+
+      {importPreview && (
+        <ImportPreviewModal
+          fileName={importPreview.fileName}
+          headerCells={importPreview.headerCells}
+          dataRows={importPreview.dataRows}
+          initialMapping={importPreview.initialMapping}
+          availableWidths={availableWidths}
+          allowRotation={allowRotation}
+          onCancel={() => setImportPreview(null)}
+          onConfirm={handleConfirmImport}
+        />
+      )}
     </div>
   )
 }
