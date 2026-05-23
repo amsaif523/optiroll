@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
-import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors, Lock } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors } from 'lucide-react'
 import ImportPreviewModal, { FieldKey } from './ImportPreviewModal'
 
 const IN_TO_M = 0.0254
@@ -166,7 +166,7 @@ export default function WorkOrderBuilder({
         }
 
         const initial: Partial<Record<FieldKey, number>> = {}
-        const shade    = findCol('shade', 'sr no', 'sr.', 's.no', 'sl no', 'sno')
+        const shade    = findCol('product name', 'item name', 'shade', 'sr no', 'sr.', 's.no', 'sl no', 'sno')
         if (shade    !== undefined) initial.shade = shade
         const type     = findCol('type', 'blind type')
         if (type     !== undefined) initial.type = type
@@ -420,19 +420,6 @@ export default function WorkOrderBuilder({
                   : `${form.selected_widths.map(fmtRollWidth).join(', ')} selected.`}
             </p>
 
-            {/* Per-piece grain lock — overrides job-wide rotation for striped / patterned fabric */}
-            <label className="mt-2.5 flex items-center justify-between cursor-pointer">
-              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-surface-600">
-                <Lock size={11} className="text-surface-500" />
-                Lock grain (no rotation)
-              </span>
-              <input
-                type="checkbox"
-                checked={form.grain_locked}
-                onChange={e => setForm(f => ({ ...f, grain_locked: e.target.checked }))}
-                className="w-4 h-4 accent-brand-600 cursor-pointer"
-              />
-            </label>
           </div>
 
           <div className="flex items-center justify-between">
