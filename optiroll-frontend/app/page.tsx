@@ -112,7 +112,7 @@ interface DashboardData {
 }
 
 // 5-decimal precision for dimension values
-const fmtDim = (v: number) => v.toFixed(5)
+const fmtDim = (v: number) => parseFloat(v.toFixed(5)).toString()
 const fmtRollWidth = (v: number | string | null | undefined) => {
   const n = Number(v)
   if (!Number.isFinite(n)) return '-'
@@ -1286,9 +1286,9 @@ function WorkOrderDetailPage({
                 <tr key={`${item.shade_number}-${idx}`} className="hover:bg-surface-50/70">
                   <td className="px-4 py-3 font-bold text-surface-800">{item.shade_number || '-'}</td>
                   <td className="px-4 py-3 capitalize">{item.blind_type}</td>
-                  <td className="px-4 py-3 text-right font-mono">{(Number(item.width) / 0.0254).toFixed(5)}</td>
-                  <td className="px-4 py-3 text-right font-mono">{(Number(item.height) / 0.0254).toFixed(5)}</td>
-                  <td className="px-4 py-3 text-right font-mono">{(Number(item.valence || 0) / 0.0254).toFixed(5)}</td>
+                  <td className="px-4 py-3 text-right font-mono">{parseFloat((Number(item.width) / 0.0254).toFixed(5)).toString()}</td>
+                  <td className="px-4 py-3 text-right font-mono">{parseFloat((Number(item.height) / 0.0254).toFixed(5)).toString()}</td>
+                  <td className="px-4 py-3 text-right font-mono">{parseFloat((Number(item.valence || 0) / 0.0254).toFixed(5)).toString()}</td>
                   <td className="px-4 py-3 text-right font-bold">{item.quantity}</td>
                   <td className="px-4 py-3">{item.material_type}</td>
                   <td className="px-4 py-3">{item.color}</td>
