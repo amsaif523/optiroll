@@ -195,8 +195,15 @@ class Optimizer {
       cut_mode: rawCutMode,
       leftover_threshold: rawLeftoverThreshold,
       mode: rawMode,
-      default_widths: rawDefaultWidths
+      default_widths: rawDefaultWidths,
+      preview: rawPreview,
+      use_leftovers: rawUseLeftovers,
     } = payload;
+
+    // preview=true → run algorithm only, skip all DB writes
+    this.preview = !!rawPreview;
+    // use_leftovers=false → skip Phase 1 leftover packing entirely
+    this.useLeftovers = rawUseLeftovers !== false;
 
     const cutMode = rawCutMode === 'guillotine' ? 'guillotine' : DEFAULT_CUT_MODE;
     const mode = rawMode === 'deep' ? 'deep' : 'quick';
@@ -235,24 +242,34 @@ class Optimizer {
       }
     }
 
-    // Create job + persist items
-    const job = await Job.create({
-      work_order_number: work_order_number || null,
-      client_name: client_name || null,
-      allow_rotation: allowRotation
-    });
+    // Create job + persist items (skipped in preview mode)
+    let job = { id: null };
     let totalPieces = 0;
-    for (const item of items) {
-      await JobItem.create({ ...item, job_id: job.id });
-      totalPieces += parseInt(item.quantity) || 1;
+    if (!this.preview) {
+      job = await Job.create({
+        work_order_number: work_order_number || null,
+        client_name: client_name || null,
+        allow_rotation: allowRotation
+      });
+      for (const item of items) {
+        await JobItem.create({ ...item, job_id: job.id });
+        totalPieces += parseInt(item.quantity) || 1;
+      }
+    } else {
+      for (const item of items) {
+        totalPieces += parseInt(item.quantity) || 1;
+      }
     }
 
-    // BUCKET by (material, color, pattern) — items in different buckets can never share a sheet
+    // BUCKET by product_code (preferred — unique fabric identifier) or (material, color, pattern)
     const buckets = new Map();
     for (const item of items) {
-      const key = `${item.material_type}|${item.color}|${item.pattern || ''}`;
+      const key = item.product_code
+        ? `product:${item.product_code}`
+        : `${item.material_type}|${item.color}|${item.pattern || ''}`;
       if (!buckets.has(key)) {
         buckets.set(key, {
+          product_code: item.product_code || null,
           material_type: item.material_type,
           color: item.color,
           pattern: item.pattern || null,
@@ -289,6 +306,7 @@ class Optimizer {
         finalGroups.push({
           width: best.width,
           items: best.items,
+          product_code: bucket.product_code,
           material_type: bucket.material_type,
           color: bucket.color,
           pattern: bucket.pattern
@@ -312,7 +330,7 @@ class Optimizer {
 
     for (const group of finalGroups) {
       const effectiveRollWidth = group.width;
-      const { material_type, color, pattern } = group;
+      const { product_code, material_type, color, pattern } = group;
       if (!primaryRollWidth) primaryRollWidth = effectiveRollWidth;
 
       // Per-group suggestion (for UI display)
@@ -339,17 +357,20 @@ class Optimizer {
             final_height: finalHeight,
             piece_index: i,
             grain_locked: item.grain_locked === true,
+            product_code: item.product_code || product_code || null,
             material_type, color, pattern
           });
         }
       }
 
-      // PHASE 1: SMART leftover packing — each round, dry-run every eligible leftover
-      // and pick the one that places the most pieces (ties broken by min used length).
-      const leftovers = await Leftover.findByMaterialSignature(material_type, color, pattern);
-      let eligibleLeftovers = leftovers.filter(l =>
-        parseFloat(l.width) >= effectiveRollWidth * leftoverThreshold
-      );
+      // PHASE 1: SMART leftover packing (skipped when use_leftovers=false)
+      let eligibleLeftovers = [];
+      if (this.useLeftovers) {
+        const leftovers = await Leftover.findByProductOrSignature(product_code, material_type, color, pattern);
+        eligibleLeftovers = leftovers.filter(l =>
+          parseFloat(l.width) >= effectiveRollWidth * leftoverThreshold
+        );
+      }
 
       while (this.blindQueue.length > 0 && eligibleLeftovers.length > 0) {
         const snapshot = [...this.blindQueue];
@@ -395,10 +416,12 @@ class Optimizer {
         const usedLength = Math.max(...placed.map(p => p.y + p.height));
         const remainingLength = parseFloat(bestLeftover.length) - usedLength;
 
-        if (remainingLength < 0.1) {
-          await Leftover.markUsed(bestLeftover.id);
-        } else {
-          await Leftover.updateDimensions(bestLeftover.id, parseFloat(bestLeftover.width), remainingLength);
+        if (!this.preview) {
+          if (remainingLength < 0.1) {
+            await Leftover.markUsed(bestLeftover.id);
+          } else {
+            await Leftover.updateDimensions(bestLeftover.id, parseFloat(bestLeftover.width), remainingLength);
+          }
         }
 
         let previousBlinds = [];
@@ -442,7 +465,8 @@ class Optimizer {
         await this.saveSheetResult(
           job.id, sheetCounter, 'leftover',
           parseFloat(bestLeftover.width), usedLength, placed, freeRects,
-          previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
+          previousBlinds, originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY,
+          this.preview
         );
 
         eligibleLeftovers = eligibleLeftovers.filter(l => l.id !== bestLeftover.id);
@@ -501,11 +525,12 @@ class Optimizer {
       for (const sd of phase2Sheets) {
         sheetCounter++;
         const tailLength = sd.rollLength - sd.usedLength;
-        if (tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
+        if (!this.preview && tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
           await Leftover.create({
             width: sd.rollWidth,
             length: tailLength,
             material_type, color, pattern,
+            product_code: product_code || null,
             source_job_id: job.id
           });
         }
@@ -513,7 +538,8 @@ class Optimizer {
         await this.saveSheetResult(
           job.id, sheetCounter, 'fresh_roll',
           sd.rollWidth, sd.usedLength, sd.placed, sd.freeRects,
-          [], sd.rollWidth, sd.usedLength, 0, 0
+          [], sd.rollWidth, sd.usedLength, 0, 0,
+          this.preview
         );
       }
 
@@ -526,17 +552,20 @@ class Optimizer {
     }
 
     const stats = this.calculateJobStats();
-    await Job.update(job.id, {
-      status: 'optimized',
-      total_pieces: totalPieces,
-      total_sheets: this.results.length,
-      roll_width_used: primaryRollWidth,
-      total_waste_percent: stats.wastePercent,
-      total_utilization_percent: stats.utilizationPercent
-    });
+    if (!this.preview) {
+      await Job.update(job.id, {
+        status: 'optimized',
+        total_pieces: totalPieces,
+        total_sheets: this.results.length,
+        roll_width_used: primaryRollWidth,
+        total_waste_percent: stats.wastePercent,
+        total_utilization_percent: stats.utilizationPercent
+      });
+    }
 
     return {
-      job_id: job.id,
+      job_id: this.preview ? null : job.id,
+      preview: this.preview,
       work_order_number,
       client_name,
       roll_width: primaryRollWidth,
@@ -958,7 +987,8 @@ class Optimizer {
 
   async saveSheetResult(
     jobId, sheetNumber, sheetType, rollWidth, usedLength, placed, freeRects,
-    previousBlinds = [], originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY
+    previousBlinds = [], originalWidth, originalLength, leftoverOffsetX, leftoverOffsetY,
+    preview = false
   ) {
     const totalSheetArea = rollWidth * usedLength;
     const blindArea = placed.reduce((sum, p) => sum + (p.width * p.height), 0);
@@ -979,18 +1009,20 @@ class Optimizer {
       }
     }
 
-    for (const rl of reusableLeftovers) {
-      await Leftover.create({
-        width: rl.width,
-        length: rl.height,
-        material_type: placed[0].material_type,
-        color: placed[0].color,
-        pattern: placed[0].pattern,
-        source_job_id: jobId
-      });
-    }
+    if (!preview) {
+      for (const rl of reusableLeftovers) {
+        await Leftover.create({
+          width: rl.width,
+          length: rl.height,
+          material_type: placed[0].material_type,
+          color: placed[0].color,
+          pattern: placed[0].pattern,
+          product_code: placed[0].product_code || null,
+          source_job_id: jobId
+        });
+      }
 
-    await OptimizationResult.create({
+      await OptimizationResult.create({
       job_id: jobId,
       sheet_number: sheetNumber,
       sheet_type: sheetType,
@@ -1011,9 +1043,10 @@ class Optimizer {
       })),
       waste_areas: wasteAreas,
       reusable_leftovers: reusableLeftovers,
-      utilization_percent: parseFloat(utilization.toFixed(2)),
-      waste_percent: parseFloat(wastePercent.toFixed(2))
-    });
+        utilization_percent: parseFloat(utilization.toFixed(2)),
+        waste_percent: parseFloat(wastePercent.toFixed(2))
+      });
+    } // end if (!preview)
 
     this.results.push({
       sheet_number: sheetNumber,

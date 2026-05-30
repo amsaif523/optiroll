@@ -38,20 +38,22 @@ exports.run = async (req, res, next) => {
       leftover_threshold,
       default_widths
     });
-    await ActivityLog.create({
-      user_id: req.user?.id,
-      action: 'job.optimized',
-      entity_type: 'job',
-      entity_id: result.job_id,
-      description: `Optimized work order ${result.work_order_number || result.job_id} (${result.mode || 'quick'})`,
-      metadata: {
-        total_pieces: result.total_pieces,
-        total_sheets: result.total_sheets,
-        roll_width: result.roll_width,
-        mode: result.mode,
-        cut_mode: result.cut_mode
-      }
-    });
+    if (!result.preview) {
+      await ActivityLog.create({
+        user_id: req.user?.id,
+        action: 'job.optimized',
+        entity_type: 'job',
+        entity_id: result.job_id,
+        description: `Optimized work order ${result.work_order_number || result.job_id} (${result.mode || 'quick'})`,
+        metadata: {
+          total_pieces: result.total_pieces,
+          total_sheets: result.total_sheets,
+          roll_width: result.roll_width,
+          mode: result.mode,
+          cut_mode: result.cut_mode
+        }
+      });
+    }
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);

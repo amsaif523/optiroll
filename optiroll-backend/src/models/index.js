@@ -46,10 +46,11 @@ const Roll = {
 
 const Leftover = {
   create: async (data) => {
-    const sql = `INSERT INTO leftovers (original_roll_id, width, length, material_type, color, pattern, source_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO leftovers (original_roll_id, width, length, material_type, color, pattern, product_code, source_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await pool.execute(sql, [
       data.original_roll_id || null, data.width, data.length,
-      data.material_type, data.color, data.pattern || null, data.source_job_id || null
+      data.material_type, data.color, data.pattern || null,
+      data.product_code || null, data.source_job_id || null
     ]);
     return { id: result.insertId, ...data };
   },
@@ -121,6 +122,19 @@ const Leftover = {
   findByMaterialSignature: async (material_type, color, pattern) => {
     return query('SELECT * FROM leftovers WHERE status = "available" AND material_type = ? AND color = ? AND (pattern = ? OR pattern IS NULL) ORDER BY width ASC, length ASC',
       [material_type, color, pattern || null]);
+  },
+  findByProductOrSignature: async (product_code, material_type, color, pattern) => {
+    if (product_code) {
+      const rows = await query(
+        'SELECT * FROM leftovers WHERE status = "available" AND product_code = ? ORDER BY width ASC, length ASC',
+        [product_code]
+      );
+      if (rows.length > 0) return rows;
+    }
+    return query(
+      'SELECT * FROM leftovers WHERE status = "available" AND material_type = ? AND color = ? AND (pattern = ? OR pattern IS NULL) ORDER BY width ASC, length ASC',
+      [material_type, color, pattern || null]
+    );
   },
   markUsed: async (id) => pool.execute('UPDATE leftovers SET status = "used" WHERE id = ?', [id]),
   updateDimensions: async (id, width, length) => {
@@ -229,9 +243,11 @@ const JobItem = {
       ? JSON.stringify(data.selected_widths)
       : null;
     const grainLocked = data.grain_locked === true || data.grain_locked === 1 ? 1 : 0;
-    const sql = `INSERT INTO job_items (job_id, shade_number, blind_type, width, height, valence, final_height, quantity, material_type, color, pattern, selected_widths, grain_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO job_items (job_id, shade_number, product_id, product_code, blind_type, width, height, valence, final_height, quantity, material_type, color, pattern, selected_widths, grain_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await pool.execute(sql, [
-      data.job_id, data.shade_number || null, data.blind_type, data.width, data.height,
+      data.job_id, data.shade_number || null,
+      data.product_id || null, data.product_code || null,
+      data.blind_type, data.width, data.height,
       data.valence || 0, final_height, data.quantity || 1,
       data.material_type, data.color, data.pattern || null,
       selectedWidths, grainLocked
@@ -423,4 +439,119 @@ const ActivityLog = {
   }
 };
 
-module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, Setting, User, ActivityLog, query };
+const Product = {
+  findPage: async (filters = {}) => {
+    const { page, limit, offset } = pageArgs(filters.page, filters.limit);
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += ' AND (p.product_name LIKE ? OR p.product_code LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.unit) {
+      where += ' AND p.unit = ?';
+      params.push(filters.unit);
+    }
+    const countRows = await query(`SELECT COUNT(*) AS total FROM products p ${where}`, params);
+    const rows = await query(`
+      SELECT p.id, p.product_name, p.product_code, p.unit, p.sale_rate, p.created_at, p.updated_at,
+             u.full_name AS created_by_name
+      FROM products p
+      LEFT JOIN users u ON u.id = p.created_by
+      ${where}
+      ORDER BY p.product_name ASC
+      LIMIT ${limit} OFFSET ${offset}
+    `, params);
+    return pagedResult(rows, countRows[0]?.total || 0, page, limit);
+  },
+  findById: async (id) => {
+    const rows = await query(`
+      SELECT p.*, u.full_name AS created_by_name
+      FROM products p
+      LEFT JOIN users u ON u.id = p.created_by
+      WHERE p.id = ?
+    `, [id]);
+    return rows[0] || null;
+  },
+  create: async (data, userId) => {
+    const sql = `INSERT INTO products (product_name, product_code, unit, sale_rate, created_by) VALUES (?, ?, ?, ?, ?)`;
+    const [result] = await pool.execute(sql, [
+      data.product_name, data.product_code, data.unit || 'SQFT',
+      data.sale_rate != null ? data.sale_rate : null, userId || null
+    ]);
+    return { id: result.insertId, ...data };
+  },
+  update: async (id, data) => {
+    const fields = [];
+    const values = [];
+    if (data.product_name !== undefined) { fields.push('product_name = ?'); values.push(data.product_name); }
+    if (data.product_code !== undefined) { fields.push('product_code = ?'); values.push(data.product_code); }
+    if (data.unit !== undefined) { fields.push('unit = ?'); values.push(data.unit); }
+    if (data.sale_rate !== undefined) { fields.push('sale_rate = ?'); values.push(data.sale_rate != null ? data.sale_rate : null); }
+    if (fields.length === 0) return;
+    values.push(id);
+    await pool.execute(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`, values);
+  },
+  delete: async (id) => pool.execute('DELETE FROM products WHERE id = ?', [id]),
+  bulkUpsert: async (rows, userId) => {
+    if (!rows || rows.length === 0) return { processed: 0 };
+    const conn = await pool.getConnection();
+    let processed = 0;
+    try {
+      await conn.beginTransaction();
+      const chunkSize = 100;
+      for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        const placeholders = chunk.map(() => '(?, ?, ?, ?, ?)').join(', ');
+        const values = chunk.flatMap(r => [
+          r.product_name, r.product_code, r.unit || 'SQFT',
+          r.sale_rate != null ? r.sale_rate : null, userId || null
+        ]);
+        await conn.execute(
+          `INSERT INTO products (product_name, product_code, unit, sale_rate, created_by)
+           VALUES ${placeholders}
+           ON DUPLICATE KEY UPDATE
+             product_name = VALUES(product_name),
+             unit = VALUES(unit),
+             sale_rate = VALUES(sale_rate)`,
+          values
+        );
+        processed += chunk.length;
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+    return { processed };
+  },
+  lookup: async (names) => {
+    if (!names || names.length === 0) return { found: [], unknown: [] };
+    const found = [];
+    const unknown = [];
+    for (const name of names) {
+      if (!name) continue;
+      const rows = await query(
+        'SELECT id, product_name, product_code, unit, sale_rate FROM products WHERE product_name = ? OR product_code = ? LIMIT 1',
+        [name.trim(), name.trim()]
+      );
+      if (rows.length > 0) {
+        found.push({ ...rows[0], searched_name: name.trim() });
+      } else {
+        unknown.push(name.trim());
+      }
+    }
+    return { found, unknown };
+  },
+  findAllForExport: async () => query(`
+    SELECT p.product_name, p.product_code, p.unit, p.sale_rate, p.created_at,
+           u.full_name AS created_by_name
+    FROM products p
+    LEFT JOIN users u ON u.id = p.created_by
+    ORDER BY p.product_name ASC
+  `, [])
+};
+
+module.exports = { Roll, Leftover, Job, JobItem, OptimizationResult, Setting, User, ActivityLog, Product, query };

@@ -1,6 +1,8 @@
 export interface WorkOrderItem {
   id: string
   shade_number: string
+  product_id?: number | null
+  product_code?: string | null
   blind_type: 'roller' | 'zebra'
   width: number     // meters
   height: number    // meters
@@ -61,7 +63,8 @@ export interface RollWidthGroup {
 }
 
 export interface OptimizeResponse {
-  job_id: number
+  job_id: number | null
+  preview?: boolean
   work_order_number: string
   client_name: string
   roll_width: number

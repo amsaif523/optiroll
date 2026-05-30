@@ -10,18 +10,19 @@ import WorkOrderBuilder from '@/components/WorkOrderBuilder'
 import CutMapCanvas from '@/components/CutMapCanvas'
 import SettingsPanel from '@/components/SettingsPanel'
 import GuideView from '@/components/GuideView'
+import InventoryView from '@/components/InventoryView'
 import { getToken, getUser, clearToken, getInitials, AuthUser } from '@/lib/auth'
 import {
   Scissors, Loader2, AlertCircle, FileText, BarChart3, CheckCircle2,
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
-  Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList,
+  Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList, Database,
   Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
 
-type ActiveTab = 'dashboard' | 'workorder' | 'jobs' | 'leftovers' | 'activity' | 'users' | 'guide' | 'settings'
+type ActiveTab = 'dashboard' | 'workorder' | 'jobs' | 'leftovers' | 'activity' | 'users' | 'inventory' | 'guide' | 'settings'
 
 interface PagedResponse<T> {
   rows: T[]
@@ -161,6 +162,9 @@ export default function Home() {
   const [clientName, setClientName] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<OptimizeResponse | null>(null)
+  const [resultSaved, setResultSaved] = useState(false)
+  const [useLeftovers, setUseLeftovers] = useState(true)
+  const [confirmSaving, setConfirmSaving] = useState(false)
   const [error, setError] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showPiecesModal, setShowPiecesModal] = useState(false)
@@ -204,6 +208,7 @@ export default function Home() {
     setError('')
     setLoading(true)
     setResult(null)
+    setResultSaved(false)
     try {
       const token = getToken()
       const res = await fetch(`${API_BASE}/optimize/run`, {
@@ -221,6 +226,8 @@ export default function Home() {
           mode: optimizeMode,
           leftover_threshold: appSettings.leftover_reuse_threshold,
           max_roll_length: appSettings.max_roll_length,
+          use_leftovers: useLeftovers,
+          preview: true,
           items,
         }),
       })
@@ -252,6 +259,42 @@ export default function Home() {
     setLoading(false)
   }
 
+  const confirmAndSave = async () => {
+    if (!result || resultSaved || confirmSaving) return
+    setConfirmSaving(true)
+    try {
+      const token = getToken()
+      const res = await fetch(`${API_BASE}/optimize/run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          work_order_number: workOrderNumber,
+          client_name: clientName,
+          roll_width: 0,
+          allow_rotation: allowRotation,
+          cut_mode: cutMode,
+          mode: optimizeMode,
+          leftover_threshold: appSettings.leftover_reuse_threshold,
+          max_roll_length: appSettings.max_roll_length,
+          use_leftovers: useLeftovers,
+          preview: false,
+          items,
+        }),
+      })
+      if (res.status === 401) { handleLogout(); return }
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || 'Save failed')
+      setResult(data.data)
+      setResultSaved(true)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Save failed')
+    }
+    setConfirmSaving(false)
+  }
+
   const initials = user?.full_name ? getInitials(user.full_name) : user?.username?.slice(0, 2).toUpperCase() ?? 'OP'
 
   // Best suggestion (excluding the one already used)
@@ -265,6 +308,7 @@ export default function Home() {
     { icon: <Recycle size={18} />, label: 'Leftovers', tab: 'leftovers' as ActiveTab },
     { icon: <History size={18} />, label: 'Activity', tab: 'activity' as ActiveTab },
     { icon: <Users size={18} />, label: 'Users', tab: 'users' as ActiveTab },
+    { icon: <Database size={18} />, label: 'Inventory', tab: 'inventory' as ActiveTab },
     { icon: <BookOpen size={18} />, label: 'User Guide', tab: 'guide' as ActiveTab },
     { icon: <Settings size={18} />, label: 'Settings', tab: 'settings' as ActiveTab },
   ]
@@ -392,6 +436,8 @@ export default function Home() {
             <ActivityView user={user} />
           ) : activeTab === 'users' ? (
             <UsersView user={user} />
+          ) : activeTab === 'inventory' ? (
+            <InventoryView />
           ) : activeTab === 'guide' ? (
             <GuideView />
           ) : activeTab === 'workorder' ? (
@@ -458,6 +504,20 @@ export default function Home() {
 
                 {/* Generate buttons (Quick + Deep) + error — always at top of right column */}
                 <div className="space-y-2">
+                  {/* Use Leftovers toggle */}
+                  <div className="flex items-center justify-between px-3 py-2.5 bg-white border border-surface-200 rounded-xl">
+                    <div className="flex items-center gap-2">
+                      <Recycle size={15} className="text-amber-500" />
+                      <span className="text-sm font-semibold text-surface-700">Use Leftover Rolls</span>
+                      <span className="text-xs text-surface-400">Reuse offcuts before cutting fresh material</span>
+                    </div>
+                    <button
+                      onClick={() => setUseLeftovers(v => !v)}
+                      className={`relative w-10 h-5 rounded-full transition-colors shrink-0 ${useLeftovers ? 'bg-amber-500' : 'bg-surface-300'}`}
+                    >
+                      <span className={`absolute top-[2px] left-[2px] w-[17px] h-[17px] bg-white rounded-full shadow transition-transform ${useLeftovers ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       onClick={() => {
@@ -503,6 +563,31 @@ export default function Home() {
 
                 {result ? (
                   <div className="space-y-4">
+                    {/* Confirm & Save banner */}
+                    {!resultSaved ? (
+                      <div className="flex items-center justify-between gap-3 px-4 py-3 bg-amber-50 border border-amber-300 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <AlertCircle size={15} className="text-amber-600 shrink-0" />
+                          <div>
+                            <p className="text-sm font-bold text-amber-800">Preview only — not saved yet</p>
+                            <p className="text-xs text-amber-600">You can re-optimize as many times as you like. Confirm to save to Job History and update leftover rolls.</p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={confirmAndSave}
+                          disabled={confirmSaving}
+                          className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors disabled:opacity-60"
+                        >
+                          {confirmSaving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                          {confirmSaving ? 'Saving…' : 'Confirm & Save'}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-xl">
+                        <CheckCircle2 size={15} className="text-emerald-600" />
+                        <p className="text-sm font-semibold text-emerald-700">Saved to Job History — leftovers updated</p>
+                      </div>
+                    )}
                     <div className="panel">
                       <div className="panel-header">
                         <div className="flex items-center gap-3">
@@ -517,8 +602,8 @@ export default function Home() {
                           >
                             <Eye size={13} /> Piece Details
                           </button>
-                          <span className="badge bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            <CheckCircle2 size={12} className="mr-1" /> Optimized
+                          <span className={`badge border ${resultSaved ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                            {resultSaved ? <><CheckCircle2 size={12} className="mr-1" /> Saved</> : <><Scissors size={12} className="mr-1" /> Preview</>}
                           </span>
                         </div>
                       </div>

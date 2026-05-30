@@ -22,6 +22,7 @@ app.use('/api/settings', auth, require('./routes/settings'));
 app.use('/api/users', auth, require('./routes/users'));
 app.use('/api/activity', auth, require('./routes/activity'));
 app.use('/api/dashboard', auth, require('./routes/dashboard'));
+app.use('/api/products', auth, require('./routes/products'));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'optiroll-backend' });

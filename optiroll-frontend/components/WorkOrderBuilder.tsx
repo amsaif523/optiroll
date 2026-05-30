@@ -1,10 +1,14 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useRef, useState, useCallback } from 'react'
 import * as XLSX from 'xlsx'
 import { WorkOrderItem } from '@/types'
-import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors } from 'lucide-react'
+import { Plus, Layers, Hash, Ruler, ArrowUpDown, RotateCcw, Upload, Download, X, Scissors, Search, PackagePlus } from 'lucide-react'
 import ImportPreviewModal, { FieldKey } from './ImportPreviewModal'
+import AddUnknownProductsModal, { ProductResolution } from './AddUnknownProductsModal'
+import { getToken } from '@/lib/auth'
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
 
 const IN_TO_M = 0.0254
 const fmtDim = (v: number) => v.toFixed(5)
@@ -25,6 +29,14 @@ interface ImportResult {
   skipped: { row: number; reason: string }[]
 }
 
+interface ProductSuggestion {
+  id: number
+  product_name: string
+  product_code: string
+  unit: string
+  sale_rate: number | null
+}
+
 export default function WorkOrderBuilder({
   items, onChange,
   availableWidths,
@@ -33,6 +45,8 @@ export default function WorkOrderBuilder({
 }: Props) {
   const [form, setForm] = useState({
     shade_number: '',
+    product_id:   null as number | null,
+    product_code: null as string | null,
     blind_type: 'roller' as 'roller' | 'zebra',
     width:    NaN,
     height:   NaN,
@@ -45,6 +59,16 @@ export default function WorkOrderBuilder({
     grain_locked: false,
   })
 
+  // Product autocomplete
+  const [suggestions, setSuggestions] = useState<ProductSuggestion[]>([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const suggestTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Post-import unknown products modal
+  const [pendingItems, setPendingItems] = useState<WorkOrderItem[]>([])
+  const [unknownShades, setUnknownShades] = useState<string[]>([])
+  const [showUnknownModal, setShowUnknownModal] = useState(false)
+
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
   const [importPreview, setImportPreview] = useState<{
     fileName: string
@@ -53,6 +77,33 @@ export default function WorkOrderBuilder({
     initialMapping: Partial<Record<FieldKey, number>>
   } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const fetchSuggestions = useCallback(async (q: string) => {
+    if (!q.trim()) { setSuggestions([]); setShowSuggestions(false); return }
+    try {
+      const token = getToken()
+      const res = await fetch(`${API_BASE}/products?q=${encodeURIComponent(q)}&limit=10`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+      })
+      const json = await res.json()
+      if (json.success) {
+        setSuggestions(json.data.rows || [])
+        setShowSuggestions(true)
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  const handleShadeChange = (value: string) => {
+    setForm(f => ({ ...f, shade_number: value, product_id: null, product_code: null }))
+    if (suggestTimer.current) clearTimeout(suggestTimer.current)
+    suggestTimer.current = setTimeout(() => fetchSuggestions(value), 200)
+  }
+
+  const selectProduct = (p: ProductSuggestion) => {
+    setForm(f => ({ ...f, shade_number: p.product_name, product_id: p.id, product_code: p.product_code }))
+    setShowSuggestions(false)
+    setSuggestions([])
+  }
 
   const toggleWidth = (w: number) => {
     const next = form.selected_widths.includes(w)
@@ -96,6 +147,8 @@ export default function WorkOrderBuilder({
     onChange([...items, {
       id: crypto.randomUUID(),
       shade_number:   form.shade_number,
+      product_id:     form.product_id,
+      product_code:   form.product_code,
       blind_type:     form.blind_type,
       width:          widthM,
       height:         heightM,
@@ -195,10 +248,63 @@ export default function WorkOrderBuilder({
     reader.readAsArrayBuffer(file)
   }
 
-  const handleConfirmImport = (newItems: WorkOrderItem[]) => {
-    if (newItems.length > 0) onChange([...items, ...newItems])
-    setImportResult({ imported: newItems.length, skipped: [] })
+  const handleConfirmImport = async (newItems: WorkOrderItem[]) => {
     setImportPreview(null)
+    if (newItems.length === 0) return
+
+    // Deduplicate shade_numbers, then look them up in inventory
+    const seen = new Set<string>()
+    const shadeNames = newItems.map(i => i.shade_number).filter(s => { if (!s || seen.has(s)) return false; seen.add(s); return true })
+    try {
+      const token = getToken()
+      const res = await fetch(`${API_BASE}/products/lookup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ names: shadeNames }),
+      })
+      const json = await res.json()
+      if (json.success) {
+        const { found, unknown } = json.data as { found: { id: number; product_name: string; product_code: string; searched_name: string }[]; unknown: string[] }
+        // Enrich items with product info where matched
+        const enriched = newItems.map(item => {
+          const match = found.find(p => p.searched_name === item.shade_number)
+          return match ? { ...item, product_id: match.id, product_code: match.product_code } : item
+        })
+        if (unknown.length > 0) {
+          setPendingItems(enriched)
+          setUnknownShades(unknown)
+          setShowUnknownModal(true)
+        } else {
+          onChange([...items, ...enriched])
+          setImportResult({ imported: enriched.length, skipped: [] })
+        }
+        return
+      }
+    } catch { /* fall through */ }
+
+    // Fallback: add without product linking
+    onChange([...items, ...newItems])
+    setImportResult({ imported: newItems.length, skipped: [] })
+  }
+
+  const handleUnknownResolved = (mappings: ProductResolution[]) => {
+    const enriched = pendingItems.map(item => {
+      const m = mappings.find(m => m.shade === item.shade_number)
+      return m ? { ...item, product_id: m.product_id, product_code: m.product_code } : item
+    })
+    onChange([...items, ...enriched])
+    setImportResult({ imported: enriched.length, skipped: [] })
+    setShowUnknownModal(false)
+    setPendingItems([])
+    setUnknownShades([])
+  }
+
+  const handleUnknownSkip = () => {
+    onChange([...items, ...pendingItems])
+    setImportResult({ imported: pendingItems.length, skipped: [] })
+    setShowUnknownModal(false)
+    setPendingItems([])
+    setUnknownShades([])
   }
 
   const finalHDisplay = (() => {
@@ -296,17 +402,47 @@ export default function WorkOrderBuilder({
         </div>
 
         {/* Row 1: Shade, Width, Height */}
-        <div className="grid grid-cols-12 gap-3">
+        <div className="grid grid-cols-12 gap-3 items-start">
           <div className="col-span-5">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
               <Hash size={10} /> Shade #
             </label>
-            <input
-              value={form.shade_number}
-              onChange={e => setForm(f => ({ ...f, shade_number: e.target.value }))}
-              placeholder="BR-001"
-              className="w-full"
-            />
+            <div className="relative">
+              <input
+                value={form.shade_number}
+                onChange={e => handleShadeChange(e.target.value)}
+                onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                placeholder="Type to search…"
+                className="w-full pr-7"
+              />
+              <Search size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-surface-300 pointer-events-none" />
+              {/* Suggestions dropdown */}
+              {showSuggestions && suggestions.length > 0 && (
+                <div className="absolute z-50 left-0 top-full mt-1 min-w-[340px] w-max max-w-[480px] bg-white border border-surface-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
+                  {suggestions.map(p => (
+                    <button
+                      key={p.id}
+                      onMouseDown={() => selectProduct(p)}
+                      className="w-full text-left px-3 py-2.5 hover:bg-brand-50 flex items-center gap-3 border-b border-surface-50 last:border-0"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-surface-800 font-medium leading-tight">{p.product_name}</p>
+                        {p.unit && <p className="text-[11px] text-surface-400 mt-0.5">{p.unit}{p.sale_rate != null ? ` · ${p.sale_rate}` : ''}</p>}
+                      </div>
+                      <span className="text-[11px] font-mono bg-surface-100 text-surface-600 px-2 py-0.5 rounded shrink-0">{p.product_code}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {/* Not-in-inventory badge */}
+              {form.shade_number && !form.product_id && !showSuggestions && (
+                <div className="absolute z-40 left-0 right-0 top-full mt-1 flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <PackagePlus size={12} className="text-amber-600 shrink-0" />
+                  <span className="text-[11px] text-amber-700">Not in inventory</span>
+                </div>
+              )}
+            </div>
           </div>
           <div className="col-span-3">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
@@ -482,6 +618,14 @@ export default function WorkOrderBuilder({
           allowRotation={allowRotation}
           onCancel={() => setImportPreview(null)}
           onConfirm={handleConfirmImport}
+        />
+      )}
+
+      {showUnknownModal && (
+        <AddUnknownProductsModal
+          unknownShades={unknownShades}
+          onResolved={handleUnknownResolved}
+          onSkip={handleUnknownSkip}
         />
       )}
     </div>

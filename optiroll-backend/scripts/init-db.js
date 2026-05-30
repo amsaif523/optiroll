@@ -121,6 +121,9 @@ const initDB = async () => {
   };
   await addColumnIfMissing('job_items', 'selected_widths', 'JSON NULL AFTER pattern');
   await addColumnIfMissing('job_items', 'grain_locked', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER selected_widths');
+  await addColumnIfMissing('job_items', 'product_id', 'INT DEFAULT NULL AFTER shade_number');
+  await addColumnIfMissing('job_items', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER product_id');
+  await addColumnIfMissing('leftovers', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER pattern');
   // Widen shade_number — earlier installs capped at VARCHAR(50), which
   // overflowed when users mapped Shade # to a long Product Name column.
   try {
@@ -169,6 +172,22 @@ const initDB = async () => {
       INDEX idx_created_at (created_at),
       INDEX idx_user (user_id),
       INDEX idx_entity (entity_type, entity_id)
+    )
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_name VARCHAR(255) NOT NULL,
+      product_code VARCHAR(100) NOT NULL UNIQUE,
+      unit VARCHAR(20) NOT NULL DEFAULT 'SQFT',
+      sale_rate DECIMAL(10,2) DEFAULT NULL,
+      created_by INT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_product_name (product_name),
+      INDEX idx_product_code (product_code),
+      INDEX idx_created_by (created_by)
     )
   `);
 
