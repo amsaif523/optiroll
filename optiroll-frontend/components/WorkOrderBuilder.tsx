@@ -49,6 +49,7 @@ export default function WorkOrderBuilder({
     product_code: null as string | null,
     blind_type: 'roller' as 'roller' | 'zebra',
     width:    NaN,
+    cut:      1,
     height:   NaN,
     valence:  6,
     quantity: NaN,
@@ -58,6 +59,7 @@ export default function WorkOrderBuilder({
     selected_widths: [] as number[],
     grain_locked: false,
   })
+  const [cutRaw, setCutRaw] = useState<string>('1')
 
   // Product autocomplete
   const [suggestions, setSuggestions] = useState<ProductSuggestion[]>([])
@@ -119,25 +121,30 @@ export default function WorkOrderBuilder({
     if (isNaN(form.quantity) || form.quantity < 1) { alert('Quantity must be ≥ 1'); return }
     if (form.selected_widths.length === 0)         { alert('Select at least one roll width for this piece'); return }
 
+    const cutIn    = isNaN(form.cut) ? 0 : Math.max(0, form.cut)
+    if (cutIn >= form.width) { alert('Cut must be less than Width'); return }
     const widthM   = form.width  * IN_TO_M
+    const cutM     = cutIn * IN_TO_M
+    const effWidthM = widthM - cutM   // fabric width packed/plotted = width − cut
     const heightM  = form.height * IN_TO_M
     const valenceM = isNaN(form.valence) ? 0 : form.valence * IN_TO_M
     const finalHeightM = form.blind_type === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
 
     const maxSelected = Math.max(...form.selected_widths)
-    const fitsNormal  = widthM <= maxSelected
+    const fitsNormal  = effWidthM <= maxSelected
     const fitsRotated = allowRotation && finalHeightM <= maxSelected
     if (!fitsNormal && !fitsRotated) {
+      const cutNote = cutIn > 0 ? ` (after ${cutIn}" cut)` : ''
       if (allowRotation) {
         alert(
           `Cannot fit even with 90° rotation.\n\n` +
-          `Normal:  W ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m > ${fmtRollWidth(maxSelected)}\n` +
+          `Normal:  fabric W${cutNote} ${(effWidthM / IN_TO_M).toFixed(5)}" = ${effWidthM.toFixed(5)}m > ${fmtRollWidth(maxSelected)}\n` +
           `Rotated: H ${(finalHeightM / IN_TO_M).toFixed(5)}" = ${finalHeightM.toFixed(5)}m > ${fmtRollWidth(maxSelected)}\n\n` +
           `Select a wider roll or reduce the piece dimensions.`
         )
       } else {
         alert(
-          `Blind width ${form.width.toFixed(5)}" = ${widthM.toFixed(5)}m exceeds all selected roll widths.\n\n` +
+          `Fabric width${cutNote} ${(effWidthM / IN_TO_M).toFixed(5)}" = ${effWidthM.toFixed(5)}m exceeds all selected roll widths.\n\n` +
           `Either reduce the blind width, enable 90° rotation, or select a wider roll.`
         )
       }
@@ -151,6 +158,7 @@ export default function WorkOrderBuilder({
       product_code:   form.product_code,
       blind_type:     form.blind_type,
       width:          widthM,
+      cut:            cutM,
       height:         heightM,
       valence:        valenceM,
       quantity:       form.quantity,
@@ -228,6 +236,8 @@ export default function WorkOrderBuilder({
         if (height   !== undefined) initial.height = height
         const valence  = findCol('valence', 'val (')
         if (valence  !== undefined) initial.valence = valence
+        const cut      = findCol('cut', 'mechanism', 'deduction')
+        if (cut      !== undefined) initial.cut = cut
         // Pcs preferred over Qty/Quantity — for vendor quotes "Quantity" is often the SQFT total.
         const qty      = findCol('pcs', 'qty', 'quantity')
         if (qty      !== undefined) initial.qty = qty
@@ -401,9 +411,9 @@ export default function WorkOrderBuilder({
           ))}
         </div>
 
-        {/* Row 1: Shade, Width, Height */}
+        {/* Row 1: Shade, Width, Cut, Height */}
         <div className="grid grid-cols-12 gap-3 items-start">
-          <div className="col-span-5">
+          <div className="col-span-4">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
               <Hash size={10} /> Shade #
             </label>
@@ -456,7 +466,24 @@ export default function WorkOrderBuilder({
               className="w-full text-center placeholder:text-surface-300"
             />
           </div>
-          <div className="col-span-4">
+          <div className="col-span-2">
+            <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5" title="Mechanism deduction — subtracted from width before cutting">
+              <Scissors size={10} /> Cut (&quot;)
+            </label>
+            <input
+              type="text" inputMode="decimal"
+              value={cutRaw}
+              onChange={e => {
+                const raw = e.target.value.replace(/[^0-9.]/g, '')
+                setCutRaw(raw)
+                const v = parseFloat(raw)
+                if (!isNaN(v) && v >= 0) setForm(f => ({ ...f, cut: v }))
+              }}
+              placeholder="0"
+              className="w-full text-center placeholder:text-surface-300"
+            />
+          </div>
+          <div className="col-span-3">
             <label className="flex items-center gap-1 text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
               <ArrowUpDown size={10} /> H (&quot;)
             </label>
@@ -469,6 +496,17 @@ export default function WorkOrderBuilder({
             />
           </div>
         </div>
+
+        {/* Fabric width after cut — only shown when a mechanism deduction is set */}
+        {!isNaN(form.width) && form.cut > 0 && (
+          <div className="flex items-center gap-2 -mt-1 text-[11px]">
+            <span className="text-surface-400">Fabric width after cut:</span>
+            <span className={`font-mono font-bold ${form.cut < form.width ? 'text-brand-600' : 'text-red-500'}`}>
+              {form.cut < form.width ? `${fmtDim(form.width - form.cut)}"` : 'invalid (cut ≥ width)'}
+            </span>
+            <span className="text-surface-400">· mechanism space {fmtDim(form.cut)}&quot;</span>
+          </div>
+        )}
 
         {/* Row 2: Valence, Qty, Material, Color */}
         <div className="grid grid-cols-12 gap-3">

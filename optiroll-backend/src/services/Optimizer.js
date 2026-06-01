@@ -8,6 +8,34 @@ const WIDTH_TOL = 0.001;
 const DEFAULT_CUT_MODE = 'free'; // 'free' = MAXRECTS, 'guillotine' = ShelfPacker (real cross-cuts)
 const DEFAULT_LEFTOVER_THRESHOLD = 0.8; // leftover must be ≥ X × effective roll width to qualify
 
+// ─── Global optimization scoring model ──────────────────────────────────────
+// A layout (one width's full set of sheets) is scored by a weighted blend of four
+// normalized [0,1] objectives. Higher is better. This is the single objective used
+// for BOTH width selection and candidate-layout selection, so the width we pick is
+// the width we actually pack well — no selection/packing mismatch.
+//
+//   score = 0.40·utilization     within-sheet packing tightness (blind area ÷ used area)
+//         + 0.30·sheetEfficiency  fewest sheets vs. the area lower bound (≈ blinds/sheet)
+//         + 0.20·wasteReduction   internal gaps are minimal or at least reusable
+//         + 0.10·remnantReuse     leftover is concentrated into salvageable remnants
+//
+// utilization + sheetEfficiency drive goals 1-3 (max blinds/sheet, min waste, min sheets);
+// wasteReduction + remnantReuse encode goal 4 (keep remnants only when they're actually
+// reusable) and the "unusable vs reusable vs future-fit" distinction.
+const SCORE_WEIGHTS = {
+  utilization: 0.40,
+  sheetEfficiency: 0.30,
+  wasteReduction: 0.20,
+  remnantReuse: 0.10,
+};
+
+// Decreasing sort orders for the cutting-stock packers. Sorting large pieces first
+// is what makes First/Best-Fit *Decreasing* effective.
+const SORT_AREA   = (a, b) => (b.width * b.final_height) - (a.width * a.final_height);
+const SORT_HEIGHT = (a, b) => b.final_height - a.final_height;
+const SORT_WIDTH  = (a, b) => b.width - a.width;
+const SORT_PERIM  = (a, b) => (b.width + b.final_height) - (a.width + a.final_height);
+
 // Maximal Rectangles (MAXRECTS) — best practical 2D bin packing algorithm.
 class MaxRects {
   constructor(width, height) {
@@ -198,12 +226,16 @@ class Optimizer {
       default_widths: rawDefaultWidths,
       preview: rawPreview,
       use_leftovers: rawUseLeftovers,
+      save_leftovers: rawSaveLeftovers,
     } = payload;
 
     // preview=true → run algorithm only, skip all DB writes
     this.preview = !!rawPreview;
     // use_leftovers=false → skip Phase 1 leftover packing entirely
     this.useLeftovers = rawUseLeftovers !== false;
+    // save_leftovers=false → still compute reusable offcuts/tails (returned for the
+    // review sidebar) but do NOT auto-persist them; the user saves manually later.
+    this.saveLeftovers = rawSaveLeftovers !== false;
 
     const cutMode = rawCutMode === 'guillotine' ? 'guillotine' : DEFAULT_CUT_MODE;
     const mode = rawMode === 'deep' ? 'deep' : 'quick';
@@ -227,6 +259,19 @@ class Optimizer {
         item.selected_widths = item.selected_widths
           .map(Number)
           .filter(v => Number.isFinite(v) && v > 0);
+      }
+    }
+
+    // Sanitize per-item cut (mechanism deduction): negative/NaN → 0.
+    // The fabric width packed & plotted is (width − cut). Validate it stays positive.
+    for (const item of items) {
+      const cut = parseFloat(item.cut);
+      item.cut = Number.isFinite(cut) && cut > 0 ? cut : 0;
+      const ew = parseFloat(item.width) - item.cut;
+      if (ew <= 0) {
+        throw new Error(
+          `Blind "${item.shade_number}" cut ${item.cut}m is ≥ its width ${item.width}m — nothing left to cut.`
+        );
       }
     }
 
@@ -317,6 +362,7 @@ class Optimizer {
 
     this.results = [];
     this.usedLeftovers = [];
+    this.candidateLeftovers = []; // reusable offcuts + roll tails, for the review sidebar
     let sheetCounter = 0;
     let primaryRollWidth = null;
     const allSuggestions = [];
@@ -343,6 +389,9 @@ class Optimizer {
       for (const item of group.items) {
         const qty = parseInt(item.quantity) || 1;
         const valence = parseFloat(item.valence || 0);
+        const cut = parseFloat(item.cut) || 0;
+        const orderedWidth = parseFloat(item.width);
+        const effWidth = orderedWidth - cut; // fabric actually cut from the roll
         const finalHeight = item.blind_type === 'zebra'
           ? (parseFloat(item.height) * 2) + valence
           : parseFloat(item.height) + valence;
@@ -351,7 +400,9 @@ class Optimizer {
             id: `${item.shade_number || 'item'}_${i}`,
             shade_number: item.shade_number || '',
             blind_type: item.blind_type,
-            width: parseFloat(item.width),
+            width: effWidth,           // packed/plotted width = ordered width − cut
+            ordered_width: orderedWidth,
+            cut,
             height: parseFloat(item.height),
             valence,
             final_height: finalHeight,
@@ -472,48 +523,34 @@ class Optimizer {
         eligibleLeftovers = eligibleLeftovers.filter(l => l.id !== bestLeftover.id);
       }
 
-      // PHASE 2: Fresh rolls. In Deep mode, run GA to find the best chromosome
-      // (piece ordering) for this group BEFORE committing to sheets — the chromosome
-      // is then replayed with force_order so the actual packing uses GA's choice.
-      let useForceOrder = false;
-      if (mode === 'deep' && this.blindQueue.length > 0) {
-        const bestOrder = this._runGAForGroup(
-          this.blindQueue, effectiveRollWidth, rollLength, allowRotation, cutMode
-        );
-        if (bestOrder) {
-          this.blindQueue = bestOrder;
-          useForceOrder = true;
-        }
-      }
-
-      // Collect Phase 2 sheets in memory so we can run a backfill consolidation
-      // pass before committing leftovers + sheet records.
+      // PHASE 2: Fresh rolls via global candidate-layout selection.
+      // In Deep mode, the GA first searches for a strong piece ordering; that order is
+      // then fed in as one more candidate layout alongside greedy + FFD. The best-scoring
+      // full layout wins, so Deep mode is never worse than Quick.
       const phase2Sheets = [];
-      while (this.blindQueue.length > 0) {
-        const { placed, freeRects } = this.packSheet({
-          width: effectiveRollWidth,
-          length: rollLength,
-          allow_rotation: allowRotation,
-          cut_mode: cutMode,
-          force_order: useForceOrder
-        });
+      if (this.blindQueue.length > 0) {
+        let deepOrder = null;
+        if (mode === 'deep') {
+          deepOrder = this._runGAForGroup(
+            this.blindQueue, effectiveRollWidth, rollLength, allowRotation, cutMode
+          );
+        }
 
-        if (placed.length === 0) {
-          const b = this.blindQueue[0];
+        const layout = this._packGroupBestLayout(
+          this.blindQueue, effectiveRollWidth, rollLength, allowRotation, cutMode, deepOrder, false
+        );
+
+        if (!layout.allFit) {
+          const b = this.blindQueue.find(x => x != null) || {};
           throw new Error(
-            `Cannot place blind "${b.shade_number}" (${b.width.toFixed(5)}m × ${b.final_height.toFixed(5)}m) ` +
+            `Cannot place blind "${b.shade_number || '?'}" ` +
+            `(${(b.width || 0).toFixed(5)}m × ${(b.final_height || 0).toFixed(5)}m) ` +
             `on a ${effectiveRollWidth}m × ${rollLength}m roll. Check dimensions and units.`
           );
         }
 
-        const usedLength = Math.max(...placed.map(p => p.y + p.height));
-        phase2Sheets.push({
-          rollWidth: effectiveRollWidth,
-          rollLength,
-          usedLength,
-          placed,
-          freeRects
-        });
+        phase2Sheets.push(...layout.sheets);
+        this.blindQueue = []; // fully consumed by the chosen layout
       }
 
       // CROSS-SHEET BACKFILL — try to dissolve the least-used sheet by
@@ -525,14 +562,27 @@ class Optimizer {
       for (const sd of phase2Sheets) {
         sheetCounter++;
         const tailLength = sd.rollLength - sd.usedLength;
-        if (!this.preview && tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
-          await Leftover.create({
+        if (tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
+          this.candidateLeftovers.push({
             width: sd.rollWidth,
             length: tailLength,
             material_type, color, pattern,
             product_code: product_code || null,
-            source_job_id: job.id
+            sheet_number: sheetCounter,
+            source: 'tail'
           });
+          if (!this.preview && this.saveLeftovers) {
+            const tailShadesStr = [...new Set(sd.placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
+            await Leftover.create({
+              width: sd.rollWidth,
+              length: tailLength,
+              material_type, color, pattern,
+              product_code: product_code || null,
+              sheet_number: sheetCounter,
+              shades: tailShadesStr,
+              source_job_id: job.id
+            });
+          }
         }
 
         await this.saveSheetResult(
@@ -579,13 +629,24 @@ class Optimizer {
       waste_percent: stats.wastePercent,
       utilization_percent: stats.utilizationPercent,
       roll_width_suggestions: allSuggestions.sort((a, b) => b.utilization - a.utilization),
+      leftovers: this.candidateLeftovers,
+      leftovers_saved: !this.preview && this.saveLeftovers,
       sheets: this.results
     };
   }
 
-  // Score every (width, eligible items) assignment, return the best one.
-  // Score = total piece area × utilization — favors widths that fit the most pieces well.
+  // WIDTH SELECTION INTELLIGENCE
+  // ────────────────────────────
+  // For every candidate width, gather the items eligible at that width, pack the
+  // WHOLE eligible set into a full multi-sheet layout (the same cutting-stock engine
+  // Phase 2 uses), and score that layout with the global weighted model. Returns the
+  // (width, item subset) assignment with the best GLOBAL score — not the smallest
+  // immediate leftover. The caller commits the winner, removes those items, and repeats.
+  //
+  // Tie-breaks (when scores are within EPS): prefer the width that needs FEWER sheets,
+  // then the one that fits MORE pieces — directly honoring goals 1 & 3.
   _findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode, defaultWidths = STANDARD_ROLL_WIDTHS) {
+    const SCORE_EPS = 0.005;
     let best = null;
     for (const w of candidateWidths) {
       const eligible = unassigned.filter(item => {
@@ -596,8 +657,9 @@ class Optimizer {
       });
       if (eligible.length === 0) continue;
 
+      // Fast dimensional reject before the (more expensive) layout simulation.
       const allFit = eligible.every(item => {
-        const iw = parseFloat(item.width);
+        const iw = parseFloat(item.width) - (parseFloat(item.cut) || 0);
         const valence = parseFloat(item.valence || 0);
         const finalH = item.blind_type === 'zebra'
           ? (parseFloat(item.height) * 2) + valence
@@ -608,24 +670,224 @@ class Optimizer {
       });
       if (!allFit) continue;
 
-      const sim = this.simulatePacking(eligible, w, rollLength, allowRotation, cutMode);
-      if (!sim.all_fit) continue;
+      const queue = this._buildSimQueue(eligible);
+      // light=true → greedy + one FFD pass per width keeps selection fast; the chosen
+      // width is re-packed with the full strategy set in Phase 2.
+      const layout = this._packGroupBestLayout(queue, w, rollLength, allowRotation, cutMode, null, true);
+      if (!layout.allFit) continue;
+      const m = this._layoutMetrics(layout.sheets, w, rollLength);
 
-      const totalPieceArea = eligible.reduce((sum, item) => {
-        const qty = parseInt(item.quantity) || 1;
-        const valence = parseFloat(item.valence || 0);
-        const finalH = item.blind_type === 'zebra'
-          ? (parseFloat(item.height) * 2) + valence
-          : parseFloat(item.height) + valence;
-        return sum + qty * parseFloat(item.width) * finalH;
-      }, 0);
-      const score = totalPieceArea * sim.utilization;
-
-      if (!best || score > best.score) {
-        best = { width: w, items: eligible, score, utilization: sim.utilization, sheets: sim.sheets };
+      const candidate = {
+        width: w, items: eligible, score: m.score,
+        utilization: parseFloat((m.utilization * 100).toFixed(2)),
+        sheets: layout.sheets.length, blinds: m.blinds
+      };
+      if (!best) { best = candidate; continue; }
+      if (candidate.score > best.score + SCORE_EPS) { best = candidate; continue; }
+      if (Math.abs(candidate.score - best.score) <= SCORE_EPS) {
+        // Near-tie: prefer fewer sheets, then more pieces accommodated.
+        if (candidate.sheets < best.sheets ||
+            (candidate.sheets === best.sheets && candidate.blinds > best.blinds)) {
+          best = candidate;
+        }
       }
     }
     return best;
+  }
+
+  // Expand items (qty × final-height) into a lightweight packing queue for
+  // simulation/scoring. grain_locked is carried so rotation behavior matches reality.
+  _buildSimQueue(items) {
+    const queue = [];
+    for (const item of items) {
+      const qty = parseInt(item.quantity) || 1;
+      const valence = parseFloat(item.valence || 0);
+      const finalHeight = item.blind_type === 'zebra'
+        ? (parseFloat(item.height) * 2) + valence
+        : parseFloat(item.height) + valence;
+      const effWidth = parseFloat(item.width) - (parseFloat(item.cut) || 0);
+      for (let i = 0; i < qty; i++) {
+        queue.push({
+          id: `sim_${item.shade_number || 'item'}_${i}`,
+          shade_number: item.shade_number || '',
+          width: effWidth,
+          final_height: finalHeight,
+          piece_index: i,
+          grain_locked: item.grain_locked === true,
+        });
+      }
+    }
+    return queue;
+  }
+
+  // ─── Layout-level metrics (the heart of the scoring model) ──────────────────
+  // Computes the four normalized objectives + the blended score for a full set of
+  // sheets at a given roll width. All-zero-safe.
+  //
+  // NOTE on areas: MAXRECTS free rectangles OVERLAP (they're *maximal* rects), so
+  // their areas must never be summed. Internal waste is therefore derived exactly as
+  // (usedArea − blindArea); the free rects are only inspected to find the single
+  // largest reusable remnant per sheet (a conservative, overlap-proof estimate).
+  _layoutMetrics(sheets, width, rollLength) {
+    let blindArea = 0, usedArea = 0, blinds = 0;
+    let unusableInternal = 0;          // internal gaps too small to reuse → real waste
+    let reusableRemnantArea = 0;       // salvageable offcuts (internal + roll tails)
+    let totalWasteArea = 0;            // internal gaps + roll tails
+
+    for (const s of sheets) {
+      const L = s.usedLength;
+      const sheetUsedArea = width * L;
+      usedArea += sheetUsedArea;
+
+      let sheetBlindArea = 0;
+      for (const p of s.placed) { sheetBlindArea += p.width * p.height; blinds++; }
+      blindArea += sheetBlindArea;
+
+      const internalWaste = Math.max(0, sheetUsedArea - sheetBlindArea);
+      totalWasteArea += internalWaste;
+
+      // Largest qualifying free rectangle within the used region = the one offcut
+      // we'd realistically reclaim from this sheet's interior.
+      let largestReusableInternal = 0;
+      for (const fr of (s.freeRects || [])) {
+        if (fr.y >= L) continue;
+        const clippedH = Math.min(fr.y + fr.height, L) - fr.y;
+        if (clippedH < MIN_REUSABLE_LENGTH || fr.width < MIN_REUSABLE_WIDTH) continue;
+        const a = fr.width * clippedH;
+        if (a > largestReusableInternal) largestReusableInternal = a;
+      }
+      largestReusableInternal = Math.min(largestReusableInternal, internalWaste);
+      reusableRemnantArea += largestReusableInternal;
+      unusableInternal += (internalWaste - largestReusableInternal);
+
+      // Roll tail (the uncut remainder) — a full-width remnant, reusable when long enough.
+      const tailLen = rollLength - L;
+      if (tailLen > 0.0001) {
+        const tailArea = width * tailLen;
+        totalWasteArea += tailArea;
+        if (tailLen >= MIN_REUSABLE_LENGTH && width >= MIN_REUSABLE_WIDTH) {
+          reusableRemnantArea += tailArea;
+        }
+      }
+    }
+
+    const K = sheets.length;
+    const utilization = usedArea > 0 ? blindArea / usedArea : 0;
+    // Area lower bound on sheets — the fewest full rolls that could hold all blind area.
+    const minSheets = (width * rollLength) > 0
+      ? Math.max(1, Math.ceil(blindArea / (width * rollLength)))
+      : K;
+    const sheetEfficiency = K > 0 ? Math.min(1, minSheets / K) : 0;
+    const wasteReduction = usedArea > 0 ? Math.max(0, 1 - (unusableInternal / usedArea)) : 0;
+    const remnantReuse = totalWasteArea > 0 ? (reusableRemnantArea / totalWasteArea) : 1;
+
+    const score =
+      SCORE_WEIGHTS.utilization     * utilization +
+      SCORE_WEIGHTS.sheetEfficiency * sheetEfficiency +
+      SCORE_WEIGHTS.wasteReduction  * wasteReduction +
+      SCORE_WEIGHTS.remnantReuse    * remnantReuse;
+
+    return { score, utilization, sheetEfficiency, wasteReduction, remnantReuse, blinds, sheets: K };
+  }
+
+  // ─── Cutting-stock packers ──────────────────────────────────────────────────
+  // Greedy "max-per-sheet": fills one roll as densely as possible (packSheet tries all
+  // heuristic×sort combos) before opening the next. Strong when a few sheets suffice.
+  // Returns { sheets, allFit }; sheets carry full piece metadata via packSheet.
+  _packQueueGreedy(queue, width, length, allowRotation, cutMode, forceOrder = false) {
+    const saved = this.blindQueue;
+    this.blindQueue = [...queue];
+    const sheets = [];
+    let allFit = true;
+    while (this.blindQueue.length > 0) {
+      const { placed, freeRects } = this.packSheet({
+        width, length, allow_rotation: allowRotation, cut_mode: cutMode, force_order: forceOrder
+      });
+      if (placed.length === 0) { allFit = false; break; }
+      sheets.push({
+        rollWidth: width, rollLength: length,
+        usedLength: Math.max(...placed.map(p => p.y + p.height)),
+        placed, freeRects
+      });
+    }
+    this.blindQueue = saved;
+    return { sheets, allFit };
+  }
+
+  // First-Fit-Decreasing across simultaneously-open rolls (classic 1-D-ish cutting
+  // stock). Pieces are sorted big-first, then each piece drops into the first open
+  // roll that still has room; a new roll opens only when none fits. This distributes
+  // pieces globally and often escapes the local optima that pure max-per-sheet hits.
+  _packQueueMultiBin(queue, width, length, allowRotation, cutMode, sortFn) {
+    const mode = cutMode === 'guillotine' ? 'guillotine' : 'free';
+    const heuristic = mode === 'guillotine' ? 'SHELF' : 'BSSF';
+    const pieces = [...queue].filter(b => b != null).sort(sortFn);
+    const bins = []; // { bin, placed: [] }
+    let allFit = true;
+
+    for (const blind of pieces) {
+      const pieceAllowRotation = allowRotation && !blind.grain_locked;
+      let lodged = false;
+      for (const entry of bins) {
+        const r = entry.bin.insert(blind.width, blind.final_height, heuristic, pieceAllowRotation);
+        if (r) {
+          entry.placed.push({ ...blind, x: r.x, y: r.y, width: r.width, height: r.height, rotated: r.rotated });
+          lodged = true;
+          break;
+        }
+      }
+      if (lodged) continue;
+
+      const bin = mode === 'guillotine' ? new ShelfPacker(width, length) : new MaxRects(width, length);
+      const r = bin.insert(blind.width, blind.final_height, heuristic, pieceAllowRotation);
+      if (!r) { allFit = false; continue; } // doesn't fit even on a fresh empty roll
+      bins.push({ bin, placed: [{ ...blind, x: r.x, y: r.y, width: r.width, height: r.height, rotated: r.rotated }] });
+    }
+
+    const sheets = bins.map(e => ({
+      rollWidth: width, rollLength: length,
+      usedLength: Math.max(...e.placed.map(p => p.y + p.height)),
+      placed: e.placed,
+      freeRects: e.bin.getFreeRects()
+    }));
+    return { sheets, allFit };
+  }
+
+  // GLOBAL PACKING: generate several full candidate layouts and return the best-scoring
+  // one. Candidates = greedy max-per-sheet + FFD over multiple decreasing sort orders
+  // (+ the GA's chromosome order in Deep mode). Scoring every full layout — rather than
+  // committing greedily sheet-by-sheet — is what lets a larger single leftover win when
+  // it lets more blinds fit overall.
+  _packGroupBestLayout(queue, width, length, allowRotation, cutMode, deepOrder = null, light = false) {
+    const candidates = [];
+
+    const greedy = this._packQueueGreedy(queue, width, length, allowRotation, cutMode, false);
+    if (greedy.allFit) candidates.push(greedy.sheets);
+
+    const ffdSorts = light ? [SORT_AREA] : [SORT_AREA, SORT_HEIGHT, SORT_WIDTH, SORT_PERIM];
+    for (const sf of ffdSorts) {
+      const r = this._packQueueMultiBin(queue, width, length, allowRotation, cutMode, sf);
+      if (r.allFit) candidates.push(r.sheets);
+    }
+
+    if (deepOrder) {
+      const r = this._packQueueGreedy(deepOrder, width, length, allowRotation, cutMode, true);
+      if (r.allFit) candidates.push(r.sheets);
+    }
+
+    if (candidates.length === 0) {
+      // Nothing fit fully — hand back the (possibly partial) greedy result so the
+      // caller can surface a precise "cannot place" error.
+      return { sheets: greedy.sheets, allFit: false };
+    }
+
+    let bestSheets = null;
+    let bestScore = -Infinity;
+    for (const sheets of candidates) {
+      const m = this._layoutMetrics(sheets, width, length);
+      if (m.score > bestScore) { bestScore = m.score; bestSheets = sheets; }
+    }
+    return { sheets: bestSheets, allFit: true, score: bestScore };
   }
 
   // Deep Optimise: Order-based GA. Chromosome = permutation of the queue.
@@ -921,46 +1183,22 @@ class Optimizer {
     return { placed: bestPlaced, freeRects: bestFreeRects };
   }
 
-  // Pure simulation — no DB writes. Returns utilization for a given roll width.
+  // Pure simulation — no DB writes. Packs the items with the global candidate-layout
+  // engine and reports the resulting metrics for a given roll width. Backward-compatible
+  // shape ({ width, utilization, sheets, all_fit }) plus the scoring breakdown for UI.
   simulatePacking(items, width, rollLength, allowRotation, cutMode = DEFAULT_CUT_MODE) {
-    const queue = [];
-    for (const item of items) {
-      const qty = parseInt(item.quantity) || 1;
-      const valence = parseFloat(item.valence || 0);
-      const finalHeight = item.blind_type === 'zebra'
-        ? (parseFloat(item.height) * 2) + valence
-        : parseFloat(item.height) + valence;
-      for (let i = 0; i < qty; i++) {
-        queue.push({
-          id: `sim_${item.shade_number || 'item'}_${i}`,
-          width: parseFloat(item.width),
-          final_height: finalHeight,
-          piece_index: i
-        });
-      }
-    }
-
-    const savedQueue = this.blindQueue;
-    this.blindQueue = queue;
-
-    let totalBlindArea = 0;
-    let totalSheetArea = 0;
-    let sheets = 0;
-    let allFit = true;
-
-    while (this.blindQueue.length > 0) {
-      const { placed } = this.packSheet({ width, length: rollLength, allow_rotation: allowRotation, cut_mode: cutMode });
-      if (placed.length === 0) { allFit = false; break; }
-      const usedLength = Math.max(...placed.map(p => p.y + p.height));
-      totalBlindArea += placed.reduce((sum, p) => sum + p.width * p.height, 0);
-      totalSheetArea += width * usedLength;
-      sheets++;
-    }
-
-    this.blindQueue = savedQueue;
-
-    const utilization = totalSheetArea > 0 ? (totalBlindArea / totalSheetArea) * 100 : 0;
-    return { width, utilization: parseFloat(utilization.toFixed(2)), sheets, all_fit: allFit };
+    const queue = this._buildSimQueue(items);
+    const layout = this._packGroupBestLayout(queue, width, rollLength, allowRotation, cutMode, null, false);
+    const m = this._layoutMetrics(layout.sheets, width, rollLength);
+    return {
+      width,
+      utilization: parseFloat((m.utilization * 100).toFixed(2)),
+      sheets: layout.sheets.length,
+      all_fit: layout.allFit,
+      score: parseFloat(m.score.toFixed(4)),
+      blinds: m.blinds,
+      waste_percent: parseFloat(((1 - m.utilization) * 100).toFixed(2)),
+    };
   }
 
   // Runs simulation for all available widths and returns sorted suggestions.
@@ -969,7 +1207,7 @@ class Optimizer {
     for (const w of availableWidths) {
       let allFit = true;
       for (const item of items) {
-        const iw = parseFloat(item.width);
+        const iw = parseFloat(item.width) - (parseFloat(item.cut) || 0);
         const valence = parseFloat(item.valence || 0);
         const finalH = item.blind_type === 'zebra'
           ? (parseFloat(item.height) * 2) + valence
@@ -1009,17 +1247,37 @@ class Optimizer {
       }
     }
 
+    // Record reusable offcuts as candidate leftovers (for the review sidebar),
+    // regardless of preview/save mode.
+    for (const rl of reusableLeftovers) {
+      this.candidateLeftovers.push({
+        width: rl.width,
+        length: rl.height,
+        material_type: placed[0].material_type,
+        color: placed[0].color,
+        pattern: placed[0].pattern,
+        product_code: placed[0].product_code || null,
+        sheet_number: sheetNumber,
+        source: 'offcut'
+      });
+    }
+
     if (!preview) {
-      for (const rl of reusableLeftovers) {
-        await Leftover.create({
-          width: rl.width,
-          length: rl.height,
-          material_type: placed[0].material_type,
-          color: placed[0].color,
-          pattern: placed[0].pattern,
-          product_code: placed[0].product_code || null,
-          source_job_id: jobId
-        });
+      if (this.saveLeftovers) {
+        const sheetShadesStr = [...new Set(placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
+        for (const rl of reusableLeftovers) {
+          await Leftover.create({
+            width: rl.width,
+            length: rl.height,
+            material_type: placed[0].material_type,
+            color: placed[0].color,
+            pattern: placed[0].pattern,
+            product_code: placed[0].product_code || null,
+            sheet_number: sheetNumber,
+            shades: sheetShadesStr,
+            source_job_id: jobId
+          });
+        }
       }
 
       await OptimizationResult.create({
@@ -1036,6 +1294,8 @@ class Optimizer {
         y: p.y,
         width: p.width,
         height: p.height,
+        cut: p.cut || 0,
+        ordered_width: p.ordered_width !== undefined ? p.ordered_width : p.width,
         original_height: p.height_orig !== undefined ? p.height_orig : null,
         valence: p.valence || 0,
         blind_type: p.blind_type,

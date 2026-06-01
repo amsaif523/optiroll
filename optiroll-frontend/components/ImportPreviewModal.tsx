@@ -8,7 +8,7 @@ const IN_TO_M = 0.0254
 const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
 export type FieldKey =
-  | 'shade' | 'type' | 'width' | 'height' | 'valence'
+  | 'shade' | 'type' | 'width' | 'cut' | 'height' | 'valence'
   | 'qty' | 'material' | 'color' | 'pattern' | 'widths'
 
 export interface ImportPreviewProps {
@@ -26,6 +26,7 @@ const FIELDS: { key: FieldKey; label: string; required: boolean; defaultText: st
   { key: 'shade',    label: 'Shade # / Product Name', required: false, defaultText: 'Auto-generate (1, 2, 3…)' },
   { key: 'type',     label: 'Type',                   required: false, defaultText: 'Use default below' },
   { key: 'width',    label: 'Width (")',              required: true,  defaultText: '' },
+  { key: 'cut',      label: 'Cut (")',                required: false, defaultText: 'Default: 1"' },
   { key: 'height',   label: 'Height (")',             required: true,  defaultText: '' },
   { key: 'valence',  label: 'Valence (")',            required: false, defaultText: 'Default: 6"' },
   { key: 'qty',      label: 'Qty',                    required: false, defaultText: 'Default: 1' },
@@ -42,8 +43,9 @@ export default function ImportPreviewModal({
 }: ImportPreviewProps) {
   const [mapping, setMapping] = useState<Partial<Record<FieldKey, number>>>(initialMapping)
   const [defaultType, setDefaultType] = useState<'roller' | 'zebra'>('roller')
+  const [defaultCutStr, setDefaultCutStr] = useState<string>('1')
   const [defaultWidths, setDefaultWidths] = useState<number[]>(() => [...availableWidths])
-  const [rowOverrides, setRowOverrides] = useState<Record<number, { type?: 'roller' | 'zebra'; widths?: number[] }>>({})
+  const [rowOverrides, setRowOverrides] = useState<Record<number, { type?: 'roller' | 'zebra'; widths?: number[]; cutStr?: string }>>({})
 
   // Width picker dropdown state
   const [openWidthRow, setOpenWidthRow] = useState<number | null>(null)
@@ -67,6 +69,9 @@ export default function ImportPreviewModal({
 
   const setRowType = (rowNum: number, t: 'roller' | 'zebra') =>
     setRowOverrides(prev => ({ ...prev, [rowNum]: { ...prev[rowNum], type: t } }))
+
+  const setRowCutStr = (rowNum: number, cutStr: string) =>
+    setRowOverrides(prev => ({ ...prev, [rowNum]: { ...prev[rowNum], cutStr } }))
 
   const toggleRowWidth = (rowNum: number, w: number, currentWidths: number[]) => {
     const isSelected = currentWidths.includes(w)
@@ -94,6 +99,8 @@ export default function ImportPreviewModal({
       shade: string
       type: 'roller' | 'zebra'
       widthIn: number
+      cutIn: number
+      cutInStr: string
       heightIn: number
       valenceIn: number
       qty: number
@@ -121,6 +128,33 @@ export default function ImportPreviewModal({
       const widthRaw  = parseFloat(String(r[widthCol]  ?? ''))
       const heightRaw = parseFloat(String(r[heightCol] ?? ''))
       if (isNaN(widthRaw) || widthRaw <= 0 || isNaN(heightRaw) || heightRaw <= 0) continue
+
+      // Cut (mechanism deduction): row override > column mapping > defaultCutStr. Must be < width.
+      const defaultCutNum = Math.max(0, parseFloat(defaultCutStr) || 0)
+      let cutIn: number
+      let cutInStr: string
+      if (rowOverrides[rowNum]?.cutStr !== undefined) {
+        cutInStr = rowOverrides[rowNum].cutStr!
+        const p = parseFloat(cutInStr)
+        cutIn = isNaN(p) || p < 0 ? 0 : p
+      } else if (mapping.cut !== undefined) {
+        const cellStr = String(r[mapping.cut] ?? '').trim()
+        const p = parseFloat(cellStr)
+        if (cellStr !== '' && !isNaN(p) && p >= 0) {
+          cutIn = p
+          cutInStr = String(cutIn)
+        } else {
+          cutIn = defaultCutNum
+          cutInStr = defaultCutStr
+        }
+      } else {
+        cutIn = defaultCutNum
+        cutInStr = defaultCutStr
+      }
+      if (cutIn >= widthRaw) {
+        skipped.push({ row: rowNum, reason: `Cut ${cutIn}" ≥ width ${widthRaw}"` })
+        continue
+      }
 
       const shadeCell = mapping.shade !== undefined ? String(r[mapping.shade] ?? '').trim() : ''
       const shade = shadeCell || String(autoShade++)
@@ -172,22 +206,25 @@ export default function ImportPreviewModal({
       }
 
       const widthM   = widthRaw  * IN_TO_M
+      const cutM     = cutIn     * IN_TO_M
+      const effWidthM = widthM - cutM   // fabric width packed/plotted
       const heightM  = heightRaw * IN_TO_M
       const valenceM = valenceIn * IN_TO_M
       const finalHeightM = blindType === 'zebra' ? heightM * 2 + valenceM : heightM + valenceM
       const maxW = Math.max(...selectedWidths)
 
-      if (widthM > maxW && !(allowRotation && finalHeightM <= maxW)) {
-        skipped.push({ row: rowNum, reason: `${widthRaw}" won't fit on selected widths (max ${fmtRollWidth(maxW)})` })
+      if (effWidthM > maxW && !(allowRotation && finalHeightM <= maxW)) {
+        const cutNote = cutIn > 0 ? ` (after ${cutIn}" cut)` : ''
+        skipped.push({ row: rowNum, reason: `${(effWidthM / IN_TO_M).toFixed(2)}"${cutNote} won't fit on selected widths (max ${fmtRollWidth(maxW)})` })
         continue
       }
 
-      previewRows.push({ rowNum, shade, type: blindType, widthIn: widthRaw, heightIn: heightRaw, valenceIn, qty, material, color, pattern, selectedWidths })
+      previewRows.push({ rowNum, shade, type: blindType, widthIn: widthRaw, cutIn, cutInStr, heightIn: heightRaw, valenceIn, qty, material, color, pattern, selectedWidths })
       items.push({
         id: crypto.randomUUID(),
         shade_number: shade,
         blind_type: blindType,
-        width: widthM, height: heightM, valence: valenceM,
+        width: widthM, cut: cutM, height: heightM, valence: valenceM,
         quantity: qty,
         material_type: material, color, pattern,
         selected_widths: selectedWidths,
@@ -196,7 +233,7 @@ export default function ImportPreviewModal({
     }
 
     return { items, previewRows, skipped }
-  }, [mapping, dataRows, availableWidths, allowRotation, defaultType, defaultWidths, rowOverrides])
+  }, [mapping, dataRows, availableWidths, allowRotation, defaultType, defaultCutStr, defaultWidths, rowOverrides])
 
   const updateMapping = (key: FieldKey, value: string) => {
     setMapping(m => {
@@ -312,7 +349,7 @@ export default function ImportPreviewModal({
                 <span className="ml-2 text-brand-600">{computed.previewRows.length}</span>
               </h3>
               <p className="text-[11px] text-surface-400 mt-0.5">
-                Use the dropdowns in each row to set type and widths per piece.
+                Edit cut, type, and roll widths per row. Defaults apply when no column is mapped.
               </p>
             </div>
 
@@ -341,6 +378,21 @@ export default function ImportPreviewModal({
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Default cut */}
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-bold text-surface-500">Cut (&quot;)</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={defaultCutStr}
+                    onChange={e => {
+                      const raw = e.target.value.replace(/[^0-9.]/g, '')
+                      setDefaultCutStr(raw)
+                    }}
+                    className="w-16 text-[11px] px-2 py-1 rounded-lg border border-surface-200 bg-white font-mono text-surface-700 outline-none focus:ring-2 focus:ring-brand-300 text-center"
+                  />
                 </div>
 
                 {/* Default roll widths */}
@@ -391,16 +443,17 @@ export default function ImportPreviewModal({
                     <table className="w-full table-fixed text-[11px]">
                       <thead className="sticky top-0 z-10 bg-surface-100 border-b border-surface-200">
                         <tr className="text-surface-500 uppercase tracking-wider font-bold">
-                          <th className="px-3 py-2.5 text-left w-[20%]">Shade / Product</th>
+                          <th className="px-3 py-2.5 text-left w-[19%]">Shade / Product</th>
                           <th className="px-3 py-2.5 text-left w-[8%]">Type</th>
                           <th className="px-3 py-2.5 text-right w-[6%]">W (&quot;)</th>
+                          <th className="px-3 py-2.5 text-right w-[7%]">Cut (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[6%]">H (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[5%]">Val (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[5%]">Qty</th>
-                          <th className="px-3 py-2.5 text-left w-[10%]">Material</th>
+                          <th className="px-3 py-2.5 text-left w-[9%]">Material</th>
                           <th className="px-3 py-2.5 text-left w-[9%]">Color</th>
-                          <th className="px-3 py-2.5 text-left w-[9%]">Pattern</th>
-                          <th className="px-3 py-2.5 text-left w-[22%]">Roll Widths</th>
+                          <th className="px-3 py-2.5 text-left w-[8%]">Pattern</th>
+                          <th className="px-3 py-2.5 text-left w-[18%]">Roll Widths</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -424,6 +477,18 @@ export default function ImportPreviewModal({
                               </select>
                             </td>
                             <td className="px-3 py-2 text-right font-mono text-surface-700">{p.widthIn}</td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={p.cutInStr}
+                                onChange={e => {
+                                  const raw = e.target.value.replace(/[^0-9.]/g, '')
+                                  setRowCutStr(p.rowNum, raw)
+                                }}
+                                className="w-full text-[11px] px-1.5 py-1 rounded-lg border border-surface-200 bg-white font-mono text-surface-700 outline-none focus:ring-2 focus:ring-brand-300 text-right"
+                              />
+                            </td>
                             <td className="px-3 py-2 text-right font-mono text-surface-700">{p.heightIn}</td>
                             <td className="px-3 py-2 text-right font-mono text-surface-500">{p.valenceIn}</td>
                             <td className="px-3 py-2 text-right font-mono font-bold text-surface-800">{p.qty}</td>

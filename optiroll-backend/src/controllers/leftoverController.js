@@ -32,6 +32,45 @@ exports.getDetail = async (req, res, next) => {
   }
 };
 
+exports.create = async (req, res, next) => {
+  try {
+    const { width, length, material_type, color, pattern, product_code, shades } = req.body || {}
+    if (!width || !length || !material_type || !color) {
+      return res.status(400).json({ success: false, error: 'width, length, material_type and color are required' })
+    }
+    const w = parseFloat(width), l = parseFloat(length)
+    if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(l) || l <= 0) {
+      return res.status(400).json({ success: false, error: 'width and length must be positive numbers' })
+    }
+    const result = await Leftover.create({
+      width: w, length: l,
+      material_type: String(material_type).trim(),
+      color: String(color).trim(),
+      pattern: pattern ? String(pattern).trim() : null,
+      product_code: product_code ? String(product_code).trim() : null,
+      shades: shades ? String(shades).trim() : null,
+      sheet_number: null,
+      source_job_id: null,
+    })
+    res.json({ success: true, data: result })
+  } catch (err) {
+    next(err)
+  }
+};
+
+exports.bulkSave = async (req, res, next) => {
+  try {
+    const { leftovers, source_job_id } = req.body || {};
+    if (!Array.isArray(leftovers) || leftovers.length === 0) {
+      return res.status(400).json({ success: false, error: 'No leftovers to save' });
+    }
+    const { inserted } = await Leftover.bulkCreate(leftovers, source_job_id || null);
+    res.json({ success: true, data: { inserted } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 exports.delete = async (req, res, next) => {
   try {
     const id = getIdFromPayload(req);

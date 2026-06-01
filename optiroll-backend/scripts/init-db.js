@@ -95,6 +95,7 @@ const initDB = async () => {
       shade_number VARCHAR(255),
       blind_type ENUM('roller','zebra') NOT NULL,
       width DECIMAL(5,2) NOT NULL,
+      cut DECIMAL(5,2) NOT NULL DEFAULT 0.00,
       height DECIMAL(5,2) NOT NULL,
       valence DECIMAL(4,2) DEFAULT 0.00,
       final_height DECIMAL(5,2) NOT NULL,
@@ -123,7 +124,10 @@ const initDB = async () => {
   await addColumnIfMissing('job_items', 'grain_locked', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER selected_widths');
   await addColumnIfMissing('job_items', 'product_id', 'INT DEFAULT NULL AFTER shade_number');
   await addColumnIfMissing('job_items', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER product_id');
+  await addColumnIfMissing('job_items', 'cut', 'DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER width');
   await addColumnIfMissing('leftovers', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER pattern');
+  await addColumnIfMissing('leftovers', 'sheet_number', 'INT DEFAULT NULL AFTER product_code');
+  await addColumnIfMissing('leftovers', 'shades', 'TEXT DEFAULT NULL AFTER sheet_number');
   // Widen shade_number — earlier installs capped at VARCHAR(50), which
   // overflowed when users mapped Shade # to a long Product Name column.
   try {

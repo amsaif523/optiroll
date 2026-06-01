@@ -4,7 +4,8 @@ export interface WorkOrderItem {
   product_id?: number | null
   product_code?: string | null
   blind_type: 'roller' | 'zebra'
-  width: number     // meters
+  width: number     // meters (ordered width)
+  cut: number       // meters — mechanism deduction; fabric width packed = width − cut
   height: number    // meters
   valence: number   // meters (entered in inches, converted on add)
   quantity: number
@@ -21,12 +22,25 @@ export interface BlindPlaced {
   piece_index: number
   x: number
   y: number
-  width: number          // meters — dimension on roll
+  width: number          // meters — fabric width on roll (ordered width − cut)
   height: number         // meters — final cut height (includes valence)
+  cut?: number           // meters — mechanism deduction (for display)
+  ordered_width?: number // meters — original ordered width before the cut
   valence: number        // meters
   original_height: number
   blind_type: 'roller' | 'zebra'
   rotated: boolean
+}
+
+export interface CandidateLeftover {
+  width: number          // meters
+  length: number         // meters
+  material_type: string
+  color: string
+  pattern: string | null
+  product_code?: string | null
+  sheet_number: number
+  source: 'offcut' | 'tail'
 }
 
 export interface Sheet {
@@ -78,6 +92,8 @@ export interface OptimizeResponse {
   waste_percent: number
   utilization_percent: number
   roll_width_suggestions: RollWidthSuggestion[]
+  leftovers?: CandidateLeftover[]
+  leftovers_saved?: boolean
   sheets: Sheet[]
 }
 

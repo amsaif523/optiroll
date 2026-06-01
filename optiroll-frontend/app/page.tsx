@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import DataTable, { TableColumn } from 'react-data-table-component'
 import { DateRange } from 'react-date-range'
@@ -17,7 +17,7 @@ import {
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList, Database,
-  Search, ChevronLeft, ChevronRight, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen
+  Search, ChevronLeft, ChevronRight, Plus, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -66,6 +66,8 @@ interface LeftoverSummary {
   material_type: string
   color: string
   pattern: string | null
+  product_code: string | null
+  shades: string | null
   status: string
   source_job_id: number | null
   created_at: string
@@ -78,6 +80,14 @@ interface LeftoverStats {
   used_leftovers: number
   total_area: number
   available_area: number
+}
+
+interface ProductSuggestion {
+  id: number
+  product_name: string
+  product_code: string
+  unit: string
+  sale_rate: number | null
 }
 
 interface ActivityEntry {
@@ -165,6 +175,9 @@ export default function Home() {
   const [resultSaved, setResultSaved] = useState(false)
   const [useLeftovers, setUseLeftovers] = useState(true)
   const [confirmSaving, setConfirmSaving] = useState(false)
+  const [leftoverSel, setLeftoverSel] = useState<Set<number>>(new Set())
+  const [leftoversSavedState, setLeftoversSavedState] = useState(false)
+  const [savingLeftovers, setSavingLeftovers] = useState(false)
   const [error, setError] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showPiecesModal, setShowPiecesModal] = useState(false)
@@ -280,6 +293,7 @@ export default function Home() {
           leftover_threshold: appSettings.leftover_reuse_threshold,
           max_roll_length: appSettings.max_roll_length,
           use_leftovers: useLeftovers,
+          save_leftovers: false, // leftovers are saved manually from the review sidebar
           preview: false,
           items,
         }),
@@ -293,6 +307,57 @@ export default function Home() {
       setError(err instanceof Error ? err.message : 'Save failed')
     }
     setConfirmSaving(false)
+  }
+
+  // Whenever a new result lands, pre-select all candidate leftovers for review.
+  useEffect(() => {
+    const lo = result?.leftovers
+    setLeftoverSel(lo && lo.length > 0 ? new Set(lo.map((_, i) => i)) : new Set())
+    setLeftoversSavedState(false)
+  }, [result])
+
+  const toggleLeftover = (i: number) => {
+    setLeftoverSel(prev => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i); else next.add(i)
+      return next
+    })
+  }
+
+  const saveLeftovers = async () => {
+    if (!result?.job_id || leftoverSel.size === 0 || savingLeftovers) return
+    setSavingLeftovers(true)
+    try {
+      const token = getToken()
+      const chosen = (result.leftovers || []).filter((_, i) => leftoverSel.has(i))
+      const res = await fetch(`${API_BASE}/leftovers/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          source_job_id: result.job_id,
+          leftovers: chosen.map(l => {
+            const sheetShades = Array.from(new Set(
+              result.sheets.find(s => s.sheet_number === l.sheet_number)
+                ?.blinds.map(b => b.shade_number).filter(Boolean) ?? []
+            )).join(', ') || null
+            return {
+              width: l.width, length: l.length,
+              material_type: l.material_type, color: l.color,
+              pattern: l.pattern, product_code: l.product_code ?? null,
+              sheet_number: l.sheet_number,
+              shades: sheetShades,
+            }
+          }),
+        }),
+      })
+      if (res.status === 401) { handleLogout(); return }
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to save leftovers')
+      setLeftoversSavedState(true)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to save leftovers')
+    }
+    setSavingLeftovers(false)
   }
 
   const initials = user?.full_name ? getInitials(user.full_name) : user?.username?.slice(0, 2).toUpperCase() ?? 'OP'
@@ -570,7 +635,7 @@ export default function Home() {
                           <AlertCircle size={15} className="text-amber-600 shrink-0" />
                           <div>
                             <p className="text-sm font-bold text-amber-800">Preview only — not saved yet</p>
-                            <p className="text-xs text-amber-600">You can re-optimize as many times as you like. Confirm to save to Job History and update leftover rolls.</p>
+                            <p className="text-xs text-amber-600">You can re-optimize as many times as you like. Confirm to save to Job History; then review &amp; save leftovers separately below.</p>
                           </div>
                         </div>
                         <button
@@ -585,7 +650,7 @@ export default function Home() {
                     ) : (
                       <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-xl">
                         <CheckCircle2 size={15} className="text-emerald-600" />
-                        <p className="text-sm font-semibold text-emerald-700">Saved to Job History — leftovers updated</p>
+                        <p className="text-sm font-semibold text-emerald-700">Saved to Job History — review &amp; save leftovers below</p>
                       </div>
                     )}
                     <div className="panel">
@@ -648,9 +713,147 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {result.sheets.map(sheet => (
-                      <CutMapCanvas key={sheet.sheet_number} sheet={sheet} maxRollLength={result.max_roll_length} />
-                    ))}
+                    {/* Sheets with inline per-sheet leftover cards */}
+                    {result.sheets.map(sheet => {
+                      const allLeftovers = result.leftovers || []
+                      const sheetLeftovers = allLeftovers
+                        .map((l, globalIdx) => ({ l, globalIdx }))
+                        .filter(({ l }) => l.sheet_number === sheet.sheet_number)
+                      const hasTail   = sheetLeftovers.some(({ l }) => l.source === 'tail')
+                      const hasOffcut = sheetLeftovers.some(({ l }) => l.source === 'offcut')
+                      return (
+                        <div key={sheet.sheet_number} className="space-y-0">
+                          <CutMapCanvas sheet={sheet} maxRollLength={result.max_roll_length} />
+
+                          {sheetLeftovers.length > 0 && (
+                            <div className={`border border-t-0 rounded-b-xl overflow-hidden ${leftoversSavedState ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-200 bg-amber-50/40'}`}>
+                              {/* Header row */}
+                              <div className="flex items-center justify-between px-4 py-2 border-b border-amber-100">
+                                <div className="flex items-center gap-2">
+                                  <Recycle size={13} className={leftoversSavedState ? 'text-emerald-600' : 'text-amber-600'} />
+                                  <span className="text-[11px] font-bold text-surface-600 uppercase tracking-wider">
+                                    Remnants from Sheet #{sheet.sheet_number}
+                                  </span>
+                                  <div className="flex gap-1">
+                                    {hasTail   && <span className="badge bg-blue-50  text-blue-700  border border-blue-200  text-[10px]">Roll tail</span>}
+                                    {hasOffcut && <span className="badge bg-teal-50  text-teal-700  border border-teal-200  text-[10px]">Offcut</span>}
+                                  </div>
+                                </div>
+                                <span className="text-[10px] text-surface-400">
+                                  {sheetLeftovers.filter(({ globalIdx }) => leftoverSel.has(globalIdx)).length}/{sheetLeftovers.length} selected to save
+                                </span>
+                              </div>
+
+                              {/* Leftover rows */}
+                              <div className="divide-y divide-amber-100/60">
+                                {sheetLeftovers.map(({ l, globalIdx }) => {
+                                  const isSelected = leftoverSel.has(globalIdx)
+                                  const areaM2 = (l.width * l.length).toFixed(3)
+                                  const sheetShades = Array.from(new Set(
+                                    result.sheets.find(s => s.sheet_number === l.sheet_number)
+                                      ?.blinds.map(b => b.shade_number).filter(Boolean) ?? []
+                                  ))
+                                  return (
+                                    <label
+                                      key={globalIdx}
+                                      className={`flex flex-col gap-1.5 px-4 py-2.5 cursor-pointer transition-colors select-none ${
+                                        leftoversSavedState ? 'cursor-default' :
+                                        isSelected ? 'bg-amber-50/80 hover:bg-amber-50' : 'bg-white/60 hover:bg-amber-50/30'
+                                      }`}
+                                    >
+                                      {/* Main row */}
+                                      <div className="flex items-center gap-3">
+                                        <input
+                                          type="checkbox"
+                                          checked={isSelected}
+                                          onChange={() => !leftoversSavedState && toggleLeftover(globalIdx)}
+                                          disabled={leftoversSavedState}
+                                          className="w-4 h-4 accent-amber-600 rounded shrink-0"
+                                        />
+                                        {/* Size pill */}
+                                        <div className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono font-bold text-sm ${
+                                          l.source === 'tail' ? 'bg-blue-100 text-blue-800' : 'bg-teal-100 text-teal-800'
+                                        }`}>
+                                          {fmtRollWidth(l.width)}
+                                          <span className="text-[10px] font-normal opacity-70">×</span>
+                                          {l.length.toFixed(2)}m
+                                        </div>
+                                        {/* Source badge */}
+                                        <span className={`badge shrink-0 ${l.source === 'tail' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-teal-50 text-teal-700 border border-teal-200'}`}>
+                                          {l.source === 'tail' ? 'Roll tail' : 'Offcut'}
+                                        </span>
+                                        {/* Area */}
+                                        <span className="text-[11px] text-surface-500 font-mono shrink-0">{areaM2} m²</span>
+                                        {/* Product code */}
+                                        {l.product_code && (
+                                          <span className="badge bg-brand-50 text-brand-700 border border-brand-200 shrink-0 font-mono">{l.product_code}</span>
+                                        )}
+                                        {/* Material info */}
+                                        <span className="text-[11px] text-surface-400 ml-auto truncate">
+                                          {[l.material_type, l.color, l.pattern].filter(Boolean).join(' · ')}
+                                        </span>
+                                        {/* Saved tick */}
+                                        {leftoversSavedState && isSelected && (
+                                          <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                                        )}
+                                      </div>
+                                      {/* Shades row */}
+                                      {sheetShades.length > 0 && (
+                                        <div className="flex items-center gap-1.5 pl-7 flex-wrap">
+                                          <span className="text-[10px] font-bold text-surface-400 uppercase tracking-wider shrink-0">Shades:</span>
+                                          {sheetShades.slice(0, 8).map(shade => (
+                                            <span key={shade} className="badge bg-surface-100 text-surface-600 border border-surface-200 text-[10px] font-mono">{shade}</span>
+                                          ))}
+                                          {sheetShades.length > 8 && (
+                                            <span className="text-[10px] text-surface-400">+{sheetShades.length - 8} more</span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+
+                    {/* Save leftovers — sticky action bar at bottom when leftovers exist */}
+                    {result.leftovers && result.leftovers.length > 0 && (
+                      <div className={`sticky bottom-4 z-10 rounded-xl border shadow-lg px-4 py-3 flex items-center justify-between gap-3 ${
+                        leftoversSavedState
+                          ? 'bg-emerald-50 border-emerald-300'
+                          : 'bg-white border-amber-300'
+                      }`}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Recycle size={15} className={leftoversSavedState ? 'text-emerald-600 shrink-0' : 'text-amber-600 shrink-0'} />
+                          {leftoversSavedState ? (
+                            <p className="text-sm font-semibold text-emerald-700">Leftovers saved to inventory</p>
+                          ) : (
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-surface-700">
+                                {leftoverSel.size} of {result.leftovers.length} remnant{result.leftovers.length !== 1 ? 's' : ''} selected
+                              </p>
+                              <p className="text-[11px] text-surface-400 truncate">
+                                {!resultSaved ? 'Confirm & Save job above first to save leftovers' : 'Tick each remnant above you want to keep, then save'}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                        {!leftoversSavedState && (
+                          <button
+                            onClick={saveLeftovers}
+                            disabled={!resultSaved || leftoverSel.size === 0 || savingLeftovers}
+                            title={!resultSaved ? 'Confirm & Save the job first' : undefined}
+                            className="shrink-0 flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                          >
+                            {savingLeftovers ? <Loader2 size={14} className="animate-spin" /> : <Recycle size={14} />}
+                            Save {leftoverSel.size} Leftover{leftoverSel.size !== 1 ? 's' : ''}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                 ) : items.length > 0 ? (
@@ -1402,6 +1605,11 @@ function WorkOrderDetailPage({
   )
 }
 
+const EMPTY_LEFTOVER_FORM = {
+  width: '', length: '', material_type: '', color: '',
+  pattern: '', product_code: '', shades: '',
+}
+
 function LeftoversView() {
   const defaultDateRange = getDefaultDateRange()
   const [leftovers, setLeftovers] = useState<LeftoverSummary[]>([])
@@ -1420,6 +1628,53 @@ function LeftoversView() {
   const [statsLoading, setStatsLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Add leftover modal
+  const [addOpen, setAddOpen] = useState(false)
+  const [addForm, setAddForm] = useState(EMPTY_LEFTOVER_FORM)
+  const [addError, setAddError] = useState('')
+  const [addLoading, setAddLoading] = useState(false)
+
+  // Shade autocomplete
+  const [shadeSuggestions, setShadeSuggestions] = useState<ProductSuggestion[]>([])
+  const [showShadeSugg, setShowShadeSugg] = useState(false)
+  const shadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const shadesInputRef = useRef<HTMLInputElement>(null)
+
+  const fetchShadeSuggestions = async (q: string) => {
+    if (!q.trim()) { setShadeSuggestions([]); setShowShadeSugg(false); return }
+    try {
+      const data = await apiFetch<PagedResponse<ProductSuggestion>>(`/products?q=${encodeURIComponent(q)}&limit=8`)
+      setShadeSuggestions(data.rows || [])
+      setShowShadeSugg((data.rows || []).length > 0)
+    } catch { /* ignore */ }
+  }
+
+  const handleShadesInput = (val: string) => {
+    setAddForm(f => ({ ...f, shades: val }))
+    const parts = val.split(',')
+    const current = parts[parts.length - 1].trim()
+    if (shadeTimerRef.current) clearTimeout(shadeTimerRef.current)
+    if (current) {
+      shadeTimerRef.current = setTimeout(() => fetchShadeSuggestions(current), 200)
+    } else {
+      setShadeSuggestions([]); setShowShadeSugg(false)
+    }
+  }
+
+  const selectShade = (p: ProductSuggestion) => {
+    const parts = addForm.shades.split(',')
+    parts[parts.length - 1] = ' ' + p.product_name
+    const newShades = parts.join(',').trimStart().replace(/^,\s*/, '')
+    setAddForm(f => ({
+      ...f,
+      shades: newShades,
+      // map product_code only if not already set
+      product_code: f.product_code || p.product_code,
+    }))
+    setShadeSuggestions([]); setShowShadeSugg(false)
+    shadesInputRef.current?.focus()
+  }
+
   const loadLeftovers = async () => {
     setLoading(true)
     setError('')
@@ -1435,6 +1690,39 @@ function LeftoversView() {
       setError(err instanceof Error ? err.message : 'Failed to load leftovers')
     }
     setLoading(false)
+  }
+
+  const IN_TO_M = 0.0254
+  const handleAddLeftover = async () => {
+    setAddError('')
+    const wIn = parseFloat(addForm.width), lIn = parseFloat(addForm.length)
+    if (!addForm.material_type.trim()) { setAddError('Material is required'); return }
+    if (!addForm.color.trim()) { setAddError('Color is required'); return }
+    if (!Number.isFinite(wIn) || wIn <= 0) { setAddError('Width must be a positive number (inches)'); return }
+    if (!Number.isFinite(lIn) || lIn <= 0) { setAddError('Length must be a positive number (inches)'); return }
+    const wM = wIn * IN_TO_M, lM = lIn * IN_TO_M
+    setAddLoading(true)
+    try {
+      await apiFetch('/leftovers/create', {
+        method: 'POST',
+        body: JSON.stringify({
+          width: wM, length: lM,
+          material_type: addForm.material_type.trim(),
+          color: addForm.color.trim(),
+          pattern: addForm.pattern.trim() || null,
+          product_code: addForm.product_code.trim() || null,
+          shades: addForm.shades.trim() || null,
+        }),
+      })
+      setAddOpen(false)
+      setAddForm(EMPTY_LEFTOVER_FORM)
+      setPage(1)
+      await loadLeftovers()
+      await loadStats()
+    } catch (err: unknown) {
+      setAddError(err instanceof Error ? err.message : 'Failed to add leftover')
+    }
+    setAddLoading(false)
   }
 
   const loadStats = async () => {
@@ -1489,15 +1777,33 @@ function LeftoversView() {
   }
 
   const columns: TableColumn<LeftoverSummary>[] = [
-    { name: 'ID', selector: row => row.id, sortable: true, cell: row => <span className="font-bold text-surface-800">#{row.id}</span>, width: '90px' },
-    { name: 'Material', selector: row => row.material_type, sortable: true, minWidth: '170px' },
-    { name: 'Color', selector: row => row.color, sortable: true, minWidth: '140px' },
-    { name: 'Pattern', selector: row => row.pattern || '-', sortable: true, minWidth: '140px' },
-    { name: 'Width', selector: row => Number(row.width), sortable: true, right: true, cell: row => <span className="font-mono">{fmtRollWidth(row.width)}</span>, width: '110px' },
-    { name: 'Length', selector: row => Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{Number(row.length).toFixed(2)}m</span>, width: '110px' },
-    { name: 'Area', selector: row => Number(row.width) * Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{formatArea(row.width, row.length)}</span>, width: '110px' },
-    { name: 'Status', selector: row => row.status, sortable: true, center: true, cell: row => <span className={`badge border ${row.status === 'available' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-surface-50 text-surface-600 border-surface-200'}`}>{row.status}</span>, width: '140px' },
-    { name: 'Created', selector: row => row.created_at, sortable: true, cell: row => <span className="text-surface-500">{formatDate(row.created_at)}</span>, minWidth: '190px' },
+    { name: 'ID', selector: row => row.id, sortable: true, cell: row => <span className="font-bold text-surface-800">#{row.id}</span>, width: '80px' },
+    { name: 'Product Code', selector: row => row.product_code || '', sortable: true, cell: row => row.product_code ? <span className="font-mono text-xs text-brand-700 font-bold">{row.product_code}</span> : <span className="text-surface-300">—</span>, minWidth: '130px' },
+    { name: 'Material', selector: row => row.material_type, sortable: true, minWidth: '150px' },
+    { name: 'Color', selector: row => row.color, sortable: true, minWidth: '120px' },
+    { name: 'Pattern', selector: row => row.pattern || '-', sortable: true, minWidth: '110px' },
+    { name: 'Width', selector: row => Number(row.width), sortable: true, right: true, cell: row => <span className="font-mono">{fmtRollWidth(row.width)}</span>, width: '100px' },
+    { name: 'Length', selector: row => Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{Number(row.length).toFixed(2)}m</span>, width: '100px' },
+    { name: 'Area', selector: row => Number(row.width) * Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{formatArea(row.width, row.length)}</span>, width: '100px' },
+    {
+      name: 'Shades',
+      selector: row => row.shades || '',
+      sortable: true,
+      minWidth: '200px',
+      cell: row => row.shades ? (
+        <div className="flex flex-wrap gap-1 py-1">
+          {row.shades.split(', ').slice(0, 4).map(s => (
+            <span key={s} className="badge bg-surface-100 text-surface-600 border border-surface-200 text-[10px] font-mono">{s}</span>
+          ))}
+          {row.shades.split(', ').length > 4 && (
+            <span className="text-[10px] text-surface-400">+{row.shades.split(', ').length - 4}</span>
+          )}
+        </div>
+      ) : <span className="text-surface-300">—</span>
+    },
+    { name: 'Job', selector: row => row.source_job_id || 0, sortable: true, cell: row => row.source_job_id ? <span className="font-mono text-xs text-surface-600">#{row.source_job_id}</span> : <span className="text-surface-300">—</span>, width: '80px' },
+    { name: 'Status', selector: row => row.status, sortable: true, center: true, cell: row => <span className={`badge border ${row.status === 'available' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-surface-50 text-surface-600 border-surface-200'}`}>{row.status}</span>, width: '120px' },
+    { name: 'Created', selector: row => row.created_at, sortable: true, cell: row => <span className="text-surface-500">{formatDate(row.created_at)}</span>, minWidth: '170px' },
     {
       name: '',
       right: true,
@@ -1507,7 +1813,7 @@ function LeftoversView() {
           <button onClick={() => deleteLeftover(row.id)} className="btn-ghost p-1.5 text-red-500 hover:text-red-600" title="Delete"><Trash2 size={14} /></button>
         </div>
       ),
-      width: '110px',
+      width: '90px',
     },
   ]
 
@@ -1525,10 +1831,140 @@ function LeftoversView() {
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-surface-800">Leftovers</h2>
-        <button onClick={loadLeftovers} className="btn-ghost"><RefreshCw size={14} /> Refresh</button>
+        <div className="flex gap-2">
+          <button onClick={() => { setAddForm(EMPTY_LEFTOVER_FORM); setAddError(''); setAddOpen(true) }} className="btn-brand flex items-center gap-1.5 text-sm px-3 py-2">
+            <Plus size={15} /> Add Leftover
+          </button>
+          <button onClick={loadLeftovers} className="btn-ghost"><RefreshCw size={14} /> Refresh</button>
+        </div>
       </div>
 
       {error && <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}</div>}
+
+      {/* Add Leftover Modal */}
+      {addOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
+              <div>
+                <h3 className="font-bold text-surface-800">Add Leftover</h3>
+                <p className="text-[11px] text-surface-400 mt-0.5">Manually record a fabric remnant in inventory</p>
+              </div>
+              <button onClick={() => setAddOpen(false)} className="p-1 text-surface-400 hover:text-surface-700 rounded-lg"><X size={18} /></button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              {addError && (
+                <div className="flex items-center gap-2 p-3 bg-red-50 text-red-700 text-sm rounded-lg border border-red-200">
+                  <AlertCircle size={14} /> {addError}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Width (&quot;) *</label>
+                  <input
+                    type="text" inputMode="decimal"
+                    value={addForm.width}
+                    onChange={e => setAddForm(f => ({ ...f, width: e.target.value.replace(/[^0-9.]/g, '') }))}
+                    placeholder="e.g. 98.5"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono"
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Length (&quot;) *</label>
+                  <input
+                    type="text" inputMode="decimal"
+                    value={addForm.length}
+                    onChange={e => setAddForm(f => ({ ...f, length: e.target.value.replace(/[^0-9.]/g, '') }))}
+                    placeholder="e.g. 177"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Material *</label>
+                  <input
+                    type="text"
+                    value={addForm.material_type}
+                    onChange={e => setAddForm(f => ({ ...f, material_type: e.target.value }))}
+                    placeholder="e.g. Polyester"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Color *</label>
+                  <input
+                    type="text"
+                    value={addForm.color}
+                    onChange={e => setAddForm(f => ({ ...f, color: e.target.value }))}
+                    placeholder="e.g. White"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Pattern</label>
+                  <input
+                    type="text"
+                    value={addForm.pattern}
+                    onChange={e => setAddForm(f => ({ ...f, pattern: e.target.value }))}
+                    placeholder="e.g. Plain"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Product Code</label>
+                  <input
+                    type="text"
+                    value={addForm.product_code}
+                    onChange={e => setAddForm(f => ({ ...f, product_code: e.target.value }))}
+                    placeholder="e.g. OS-BLK"
+                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono"
+                  />
+                </div>
+              </div>
+              <div className="relative">
+                <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">
+                  Shades <span className="text-surface-400 font-normal normal-case">— type to search, comma-separate multiple</span>
+                </label>
+                <input
+                  ref={shadesInputRef}
+                  type="text"
+                  value={addForm.shades}
+                  onChange={e => handleShadesInput(e.target.value)}
+                  onBlur={() => setTimeout(() => { setShadeSuggestions([]); setShowShadeSugg(false) }, 150)}
+                  placeholder="e.g. Shade-001, Shade-002"
+                  className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono"
+                />
+                {showShadeSugg && shadeSuggestions.length > 0 && (
+                  <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-surface-200 rounded-xl shadow-lg overflow-hidden">
+                    {shadeSuggestions.map(p => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onMouseDown={() => selectShade(p)}
+                        className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-brand-50 transition-colors text-left"
+                      >
+                        <span className="font-medium text-surface-800">{p.product_name}</span>
+                        <span className="badge bg-surface-100 text-surface-500 border border-surface-200 font-mono text-[10px] ml-2 shrink-0">{p.product_code}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-surface-100">
+              <button onClick={() => setAddOpen(false)} className="btn-ghost text-sm px-4 py-2">Cancel</button>
+              <button onClick={handleAddLeftover} disabled={addLoading} className="btn-brand text-sm px-4 py-2 flex items-center gap-2">
+                {addLoading && <Loader2 size={14} className="animate-spin" />}
+                Add Leftover
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <Stat icon={<Recycle size={14} />} value={statsLoading ? '-' : stats.total_leftovers} label="Leftovers" color="text-surface-800" />
@@ -1625,10 +2061,21 @@ function LeftoverDetailPage({
           <DetailRow label="Material" value={leftover.material_type} />
           <DetailRow label="Color" value={leftover.color} />
           <DetailRow label="Pattern" value={leftover.pattern || '-'} />
+          <DetailRow label="Product Code" value={leftover.product_code || '-'} />
           <DetailRow label="Original Roll" value={leftover.original_roll_id ? `#${leftover.original_roll_id}` : '-'} />
           <DetailRow label="Created" value={formatDate(leftover.created_at)} />
           <DetailRow label="Updated" value={formatDate(leftover.updated_at)} />
         </div>
+        {leftover.shades && (
+          <div className="px-4 pb-4">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-surface-400 mb-2">Shades from Source Job</p>
+            <div className="flex flex-wrap gap-1.5">
+              {leftover.shades.split(', ').map(s => (
+                <span key={s} className="badge bg-brand-50 text-brand-700 border border-brand-200 font-mono">{s}</span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1990,7 +2437,8 @@ function PiecePreview({ items, onRemove, maxRollLength }: {
               <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">#</th>
               <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Shade</th>
               <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Type</th>
-              <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">W (&quot;)</th>
+              <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">W ordered (&quot;)</th>
+              <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">✂ Cut → Fab</th>
               <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Final H (&quot;)</th>
               <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Qty</th>
               <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Roll Widths</th>
@@ -2017,6 +2465,13 @@ function PiecePreview({ items, onRemove, maxRollLength }: {
                   </td>
                   <td className={`px-4 py-3 text-right font-mono ${widthBad ? 'text-red-600 font-bold' : 'text-surface-700'}`}>
                     {fmtDim(wIn)}&quot;{widthBad && ' ⚠'}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono">
+                    {item.cut > 0 ? (
+                      <span className="text-amber-600 font-semibold">
+                        {fmtDim(item.cut * M_TO_IN)}&quot; → {fmtDim((item.width - item.cut) * M_TO_IN)}&quot;
+                      </span>
+                    ) : <span className="text-surface-300">—</span>}
                   </td>
                   <td className={`px-4 py-3 text-right font-mono font-semibold ${heightBad ? 'text-red-600' : 'text-brand-700'}`}>
                     {fmtDim(finalHIn)}&quot;{heightBad && ' ⚠'}
@@ -2104,7 +2559,7 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
           <table className="w-full text-xs border-separate border-spacing-0">
             <thead className="sticky top-0 z-10">
               <tr className="bg-surface-50 shadow-sm">
-                {['#','Shade #','Type','Width (m)','Height (m)','Valence (in)','Final H (m)','Qty','Material','Color','Pattern','Roll Widths'].map(h => (
+                {['#','Shade #','Type','Width (m)','Cut (in)','Height (m)','Valence (in)','Final H (m)','Qty','Material','Color','Pattern','Roll Widths'].map(h => (
                   <th key={h} className="px-4 py-3 font-bold text-surface-400 uppercase tracking-wider border-b border-surface-200 text-left whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -2123,6 +2578,7 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
                       }`}>{item.blind_type}</span>
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-surface-700">{fmtDim(item.width)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-surface-500">{item.cut > 0 ? `${fmtDim(item.cut / 0.0254)}"` : '—'}</td>
                     <td className="px-4 py-3 text-right font-mono text-surface-700">{fmtDim(item.height)}</td>
                     <td className="px-4 py-3 text-right font-mono text-surface-500">{valIn > 0 ? `${fmtDim(valIn)}"` : '—'}</td>
                     <td className="px-4 py-3 text-right font-mono font-semibold text-brand-700">{fmtDim(finalH)}</td>

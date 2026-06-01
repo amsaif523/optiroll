@@ -14,6 +14,73 @@ const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 // Show inch value without trailing zeros (e.g. 47.5 not 47.50000, 47.1234 not 47.12340)
 const fmtIn = (meters: number): string => parseFloat((meters / 0.0254).toFixed(5)).toString()
 
+// tickStep  = tick spacing in meters (0.1 for both axes)
+// rightSide = true → draw Y ruler on the RIGHT edge (ticks + labels face right)
+function drawRuler(
+  ctx: CanvasRenderingContext2D,
+  totalMeters: number,
+  scale: number,
+  originX: number,
+  originY: number,
+  axis: 'x' | 'y',
+  tickStep = 0.1,
+  rightSide = false
+) {
+  if (totalMeters <= 0) return
+  const MIN_PX = 30
+  ctx.font = '10px Inter, sans-serif'
+  ctx.fillStyle = '#8b93a7'
+  ctx.strokeStyle = '#b0b8cc'
+  ctx.lineWidth = 1
+
+  // Smallest NICE multiplier so labels stay >= MIN_PX apart
+  const NICE = [1, 2, 2.5, 5, 10, 20, 50]
+  const minMult = (tickStep * scale) < MIN_PX ? Math.ceil(MIN_PX / (tickStep * scale)) : 1
+  const mult = NICE.find(n => n >= minMult) ?? 50
+  const placedPx: number[] = []
+
+  const drawOne = (v: number, isEdge: boolean) => {
+    const px = v * scale
+    const onLabel = isEdge || Math.round(v / tickStep) % mult === 0
+    const label = v < 0.000001 ? '0' : fmtRollWidth(v)
+
+    if (axis === 'x') {
+      const cx = originX + px
+      if (!isEdge) { ctx.beginPath(); ctx.moveTo(cx, originY); ctx.lineTo(cx, originY - 4); ctx.stroke() }
+      if (onLabel && !placedPx.some(p => Math.abs(p - cx) < MIN_PX)) {
+        ctx.textAlign = cx <= originX + 15 ? 'left' : (cx >= originX + totalMeters * scale - 15 ? 'right' : 'center')
+        ctx.fillText(label, cx, originY - 8)
+        placedPx.push(cx)
+      }
+    } else {
+      const cy = originY + px
+      if (!isEdge) {
+        ctx.beginPath()
+        ctx.moveTo(originX, cy)
+        ctx.lineTo(rightSide ? originX + 4 : originX - 4, cy)
+        ctx.stroke()
+      }
+      if (onLabel && !placedPx.some(p => Math.abs(p - cy) < MIN_PX)) {
+        if (rightSide) {
+          ctx.textAlign = 'left'
+          ctx.fillText(label, originX + 8, cy + 3.5)
+        } else {
+          ctx.textAlign = 'right'
+          ctx.fillText(label, originX - 8, cy + 3.5)
+        }
+        placedPx.push(cy)
+      }
+    }
+  }
+
+  drawOne(0, true)
+  const nTicks = Math.ceil(totalMeters / tickStep)
+  for (let i = 1; i < nTicks; i++) {
+    drawOne(parseFloat((i * tickStep).toFixed(8)), false)
+  }
+  drawOne(totalMeters, true)
+}
+
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
   if (!text) return []
   const words = text.split(/\s+/).filter(Boolean)
@@ -215,9 +282,11 @@ function renderCutMap(
 
     if (showLabels) {
       const typeLabel = isZebra ? 'ZEBRA' : 'ROLLER'
-      const valenceStr = b.valence !== undefined ? `Val: ${fmtIn(b.valence)}"` : null
-      const cutLen     = `${fmtIn(b.height)}"`
-      const wLabel     = `${fmtIn(b.width)}"`
+      const valenceStr = b.valence !== undefined && b.valence > 0 ? `Val: ${fmtIn(b.valence)}"` : null
+      const hasCut   = !!(b.cut && b.cut > 0)
+      const orderedW = b.ordered_width != null ? b.ordered_width : b.width
+      const cutLen   = `${fmtIn(b.height)}"`
+      const wLabel   = `${fmtIn(orderedW)}"`
 
       const fs = Math.min(12, Math.max(7, bw / 10))
       const PAD = 6
@@ -227,11 +296,14 @@ function renderCutMap(
       ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip()
       ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
 
+      // Inline cut string shown below valence: ✂ 1" → 9"
+      const cutInline = hasCut ? `✂ ${fmtIn(b.cut!)}" → ${fmtIn(b.width)}"` : null
+
       if (bh > 80 && bw > 60) {
         const shadeFs = Math.min(fs + 1, 13)
         ctx.font = `bold ${shadeFs}px Inter, sans-serif`
         const shadeLines = b.shade_number ? wrapText(ctx, b.shade_number, textMaxWidth) : []
-        const lineCount = shadeLines.length + 1 + 1 + (valenceStr ? 1 : 0) + (b.rotated ? 1 : 0)
+        const lineCount = shadeLines.length + 1 + 1 + (valenceStr ? 1 : 0) + (cutInline ? 1 : 0) + (b.rotated ? 1 : 0)
         let lineY = by + bh / 2 - ((lineCount - 1) / 2) * (fs + 3)
 
         if (shadeLines.length > 0) {
@@ -253,6 +325,11 @@ function renderCutMap(
           ctx.fillText(valenceStr, bx + bw / 2, lineY); lineY += fs + 2
         }
 
+        if (cutInline) {
+          ctx.font = `bold ${fs - 1}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
+          ctx.fillText(ellipsize(ctx, cutInline, textMaxWidth), bx + bw / 2, lineY); lineY += fs + 2
+        }
+
         if (b.rotated) {
           ctx.font = `${fs - 2}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.6)'
           ctx.fillText('↻ 90°', bx + bw / 2, lineY)
@@ -261,25 +338,29 @@ function renderCutMap(
         ctx.font = `bold ${fs}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
         const dimLine = `${wLabel} × ${cutLen}`
         const shadeText = b.shade_number ? ellipsize(ctx, b.shade_number, textMaxWidth) : ellipsize(ctx, dimLine, textMaxWidth)
-        ctx.fillText(shadeText, bx + bw / 2, by + bh / 2 - fs / 2 - 2)
+        const linesCount = 2 + (cutInline ? 1 : 0)
+        const startY = by + bh / 2 - ((linesCount - 1) / 2) * (fs + 3)
+        ctx.fillText(shadeText, bx + bw / 2, startY)
         ctx.font = `${fs - 1}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.8)'
-        ctx.fillText(ellipsize(ctx, b.shade_number ? dimLine : typeLabel, textMaxWidth), bx + bw / 2, by + bh / 2 + fs / 2 + 2)
+        ctx.fillText(ellipsize(ctx, b.shade_number ? dimLine : typeLabel, textMaxWidth), bx + bw / 2, startY + fs + 3)
+        if (cutInline) {
+          ctx.font = `bold ${fs - 1}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
+          ctx.fillText(ellipsize(ctx, cutInline, textMaxWidth), bx + bw / 2, startY + (fs + 3) * 2)
+        }
       } else if (bh > 18 || bw > 30) {
         ctx.font = `bold ${Math.max(fs - 1, 7)}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-        ctx.fillText(ellipsize(ctx, b.shade_number || typeLabel, textMaxWidth), bx + bw / 2, by + bh / 2)
+        const mainLabel = b.shade_number || typeLabel
+        ctx.fillText(ellipsize(ctx, mainLabel, textMaxWidth), bx + bw / 2, by + bh / 2)
       }
 
       ctx.restore()
     }
   }
 
-  ctx.fillStyle = '#8b93a7'; ctx.font = '11px Inter, sans-serif'
-  ctx.textAlign = 'center'
-  ctx.fillText('0', MARGIN, TOPBAR + MARGIN - 8)
-  ctx.fillText(fmtRollWidth(canvasWidth), MARGIN + sw, TOPBAR + MARGIN - 8)
-  ctx.textAlign = 'right'
-  ctx.fillText('0', MARGIN - 8, TOPBAR + MARGIN + 12)
-  ctx.fillText(`${canvasLength.toFixed(2)}m`, MARGIN - 8, TOPBAR + MARGIN + sh - 6)
+  // Width ruler (top, 0.1 m ticks) + length rulers (left + right, 0.1 m ticks)
+  drawRuler(ctx, canvasWidth,  scale, MARGIN,      MARGIN + TOPBAR, 'x', 0.1)
+  drawRuler(ctx, canvasLength, scale, MARGIN,      MARGIN + TOPBAR, 'y', 0.1, false)
+  drawRuler(ctx, canvasLength, scale, MARGIN + sw, MARGIN + TOPBAR, 'y', 0.1, true)
 }
 
 const MARGIN = 60
