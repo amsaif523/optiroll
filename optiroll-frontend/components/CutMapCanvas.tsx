@@ -2,6 +2,7 @@
 
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { Sheet } from '@/types'
+import type { jsPDF as JsPDFType } from 'jspdf'
 import { ZoomIn, ZoomOut, Download, Eye, EyeOff, Maximize2, Minimize2, History, FileText, RotateCcw } from 'lucide-react'
 
 interface Props {
@@ -366,6 +367,354 @@ function renderCutMap(
 const MARGIN = 60
 const TOPBAR = 64
 
+// ── Shared PDF renderer ──────────────────────────────────────────────────────
+// Fixed A4 page WIDTH (mm); each sheet's page height grows to fit its roll.
+const PDF_PAGE_W = 210
+const PDF_PAD = 9        // mm — page padding
+const PDF_BRAND_H = 10   // mm — top branding strip
+const PDF_FOOT_H = 14    // mm — bottom legend strip
+const PDF_INFO_H = 9     // mm — sheet info strip (width badge etc.) under the brand bar
+const PDF_IMG_AREA_W = PDF_PAGE_W - PDF_PAD * 2                          // 192 mm
+const PDF_MM_TO_PX = 150 / 25.4   // ≈ 5.906 px/mm (150 DPI)
+const PDF_MAP_MARGIN = 40         // px — ruler/label gutter inside the rendered canvas
+const PDF_MAP_TOPBAR = 64         // px — internal sheet header inside the rendered canvas
+
+// Draws the page chrome (background, branding bar, footer legend + stats, border)
+// onto the CURRENT page of the doc. `pageH` is the height of the current page (mm),
+// since each sheet gets its own page sized to the roll.
+function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageH: number) {
+  const isLeftover = sheet.sheet_type === 'leftover'
+
+  // ── Page background ─────────────────────────────────────────────
+  doc.setFillColor(248, 249, 252)
+  doc.rect(0, 0, PDF_PAGE_W, pageH, 'F')
+
+  // ── Top branding bar ────────────────────────────────────────────
+  doc.setFillColor(26, 31, 46)
+  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PDF_BRAND_H, 'F')
+
+  doc.setTextColor(226, 230, 240)
+  doc.setFontSize(8)
+  doc.setFont('helvetica', 'bold')
+  doc.text('OPTIROLL', PDF_PAD + 4, PDF_PAD + 6.5)
+
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(7)
+  doc.setTextColor(155, 163, 184)
+  const sheetLabel = `Sheet #${sheet.sheet_number}  ·  ${isLeftover ? 'Reused Leftover' : 'Fresh Roll'}  ·  ${fmtRollWidth(sheet.width)} × ${sheet.length.toFixed(2)}m  ·  Util ${sheet.utilization}%`
+  doc.text(sheetLabel, PDF_PAD + 24, PDF_PAD + 6.5)
+
+  const dateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  doc.text(dateStr, PDF_PAGE_W - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
+
+  // ── Sheet info strip (width badge etc., right next to the cut map) ───────────
+  const infoY = PDF_PAD + PDF_BRAND_H
+  doc.setFillColor(255, 255, 255)
+  doc.rect(PDF_PAD, infoY, PDF_IMG_AREA_W, PDF_INFO_H, 'F')
+  const infoMidY = infoY + 5.6
+  let ix = PDF_PAD + 3
+
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(26, 31, 46)
+  doc.text(`Sheet #${sheet.sheet_number}`, ix, infoMidY)
+  ix += doc.getTextWidth(`Sheet #${sheet.sheet_number}`) + 4
+
+  // Green "roll width used" badge
+  const widthLabel = `${fmtRollWidth(sheet.width)} wide`
+  doc.setFontSize(8); doc.setFont('helvetica', 'bold')
+  const wBadgeW = doc.getTextWidth(widthLabel) + 5
+  doc.setFillColor(16, 185, 129)
+  doc.roundedRect(ix, infoY + 2, wBadgeW, PDF_INFO_H - 4, 1, 1, 'F')
+  doc.setTextColor(255, 255, 255)
+  doc.text(widthLabel, ix + 2.5, infoMidY)
+  ix += wBadgeW + 3
+
+  // Type badge
+  const typeLabel = isLeftover ? 'Reused Leftover' : 'Fresh Roll'
+  const tBadgeW = doc.getTextWidth(typeLabel) + 5
+  if (isLeftover) { doc.setFillColor(254, 243, 199); doc.setTextColor(146, 64, 14) }
+  else { doc.setFillColor(219, 234, 254); doc.setTextColor(30, 64, 175) }
+  doc.roundedRect(ix, infoY + 2, tBadgeW, PDF_INFO_H - 4, 1, 1, 'F')
+  doc.text(typeLabel, ix + 2.5, infoMidY)
+  ix += tBadgeW + 4
+
+  // Details
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(100, 116, 139)
+  doc.text(`× ${sheet.length.toFixed(2)}m  ·  ${sheet.blinds.length} pc  ·  ${sheet.utilization}% util`, ix, infoMidY)
+
+  // ── Footer separator ─────────────────────────────────────────────
+  const footerY = pageH - PDF_PAD - PDF_FOOT_H
+  doc.setDrawColor(200, 205, 217)
+  doc.setLineWidth(0.25)
+  doc.line(PDF_PAD, footerY, PDF_PAGE_W - PDF_PAD, footerY)
+
+  // ── Legend chips ─────────────────────────────────────────────────
+  const ly = footerY + 5
+  let lx = PDF_PAD + 2
+  const chip = (r: number, g: number, b: number, label: string) => {
+    doc.setFillColor(r, g, b)
+    doc.roundedRect(lx, ly - 2.5, 4.5, 4.5, 0.8, 0.8, 'F')
+    doc.setFontSize(7.5)
+    doc.setTextColor(71, 85, 105)
+    doc.setFont('helvetica', 'normal')
+    doc.text(label, lx + 6, ly + 0.8)
+    lx += 6 + doc.getTextWidth(label) + 5
+  }
+  chip(37, 99, 235, 'Roller Blind')
+  chip(139, 92, 246, 'Zebra Blind')
+  chip(20, 184, 166, 'Reusable Leftover')
+  chip(239, 68, 68, 'Trim (lost)')
+
+  // ── Stats right ───────────────────────────────────────────────────
+  const reusableA = (sheet.reusable_leftovers || []).reduce((s, r) => s + r.width * r.height, 0)
+  const totalWasteA = (sheet.waste_areas || []).reduce((s, w) => s + w.width * w.height, 0)
+  const trimA = Math.max(0, totalWasteA - reusableA)
+  const cutA = sheet.width * sheet.length
+  const rPct = cutA > 0 ? ((reusableA / cutA) * 100).toFixed(1) : '0.0'
+  const tPct = cutA > 0 ? ((trimA / cutA) * 100).toFixed(1) : '0.0'
+
+  doc.setFontSize(7.5)
+  doc.setTextColor(100, 116, 139)
+  doc.text(
+    `${sheet.blinds.length} pieces  ·  Reusable ${rPct}%  ·  Trim ${tPct}%`,
+    PDF_PAGE_W - PDF_PAD - 3, ly + 0.8, { align: 'right' }
+  )
+
+  // ── Developed-by credit ───────────────────────────────────────────
+  doc.setFontSize(6.5)
+  doc.setFont('helvetica', 'normal')
+  doc.setTextColor(148, 163, 184)
+  doc.text('Developed by Amsaif Infotech', PDF_PAGE_W / 2, ly + 6, { align: 'center' })
+
+  // ── Page border ───────────────────────────────────────────────────
+  doc.setDrawColor(200, 205, 217)
+  doc.setLineWidth(0.4)
+  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, pageH - PDF_PAD * 2)
+}
+
+// Adds ONE sheet as ONE page. The page keeps a fixed A4 width but its HEIGHT grows to
+// match the roll, so the whole sheet always fits on a single page at full readable
+// width — short rolls give a short page, long rolls (e.g. 2m × 29m) give a tall page,
+// but it is never squished and never split across pages.
+function addSheetToPdf(doc: JsPDFType, sheet: Sheet, showPrevious: boolean, maxRollLength?: number) {
+  const isLeftover = sheet.sheet_type === 'leftover'
+  const canvasWidth = (isLeftover && (sheet.original_width || 0) > 0) ? sheet.original_width : sheet.width
+
+  const areaW_px = PDF_IMG_AREA_W * PDF_MM_TO_PX   // ≈ 1134
+  // Scale so the roll fills the page width (labels stay full size).
+  const scale = (areaW_px - PDF_MAP_MARGIN * 2) / canvasWidth
+
+  const off = document.createElement('canvas')
+  const ctx = off.getContext('2d')
+  if (!ctx) return
+  renderCutMap(ctx, sheet, scale, true, showPrevious, PDF_MAP_MARGIN, PDF_MAP_TOPBAR, maxRollLength)
+
+  const imgW_mm = off.width  / PDF_MM_TO_PX
+  const imgH_mm = off.height / PDF_MM_TO_PX
+  // Page height = padding + brand bar + info strip + the map image + footer strip.
+  const pageH = PDF_PAD * 2 + PDF_BRAND_H + PDF_INFO_H + imgH_mm + PDF_FOOT_H
+
+  doc.addPage([PDF_PAGE_W, pageH], 'portrait')
+  drawPdfChrome(doc, sheet, pageH)
+
+  const imgX = PDF_PAD + (PDF_IMG_AREA_W - imgW_mm) / 2
+  const imgY = PDF_PAD + PDF_BRAND_H + PDF_INFO_H
+  doc.addImage(off.toDataURL('image/png'), 'PNG', imgX, imgY, imgW_mm, imgH_mm)
+}
+
+// Per-sheet download — one page sized to the roll.
+export async function downloadSheetPdf(sheet: Sheet, showPrevious: boolean, maxRollLength?: number) {
+  const { jsPDF } = await import('jspdf')
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  addSheetToPdf(doc, sheet, showPrevious, maxRollLength)
+  doc.deletePage(1) // remove the initial blank A4 page
+  doc.save(`sheet-${sheet.sheet_number}.pdf`)
+}
+
+// Job-level info for the Download-All summary page.
+export interface PdfJobMeta {
+  maxRollLength?: number
+  workOrder?: string
+  client?: string
+  totalPieces?: number
+  totalSheets?: number
+  utilization?: number
+  waste?: number
+  leftoversUsed?: number
+  fileName?: string
+}
+
+// Roll widths actually used across the job's committed sheets (mixed widths allowed),
+// with sheet count, total running length and fabric area per width.
+function computeRollUsage(sheets: Sheet[]) {
+  const map = new Map<number, { width: number; sheets: number; fresh: number; leftover: number; lengthM: number; areaM2: number }>()
+  for (const s of sheets) {
+    const e = map.get(s.width) || { width: s.width, sheets: 0, fresh: 0, leftover: 0, lengthM: 0, areaM2: 0 }
+    e.sheets += 1
+    if (s.sheet_type === 'leftover') e.leftover += 1; else e.fresh += 1
+    e.lengthM += s.length
+    e.areaM2 += s.width * s.length
+    map.set(s.width, e)
+  }
+  return Array.from(map.values()).sort((a, b) => a.width - b.width)
+}
+
+// A4 summary page: job totals, roll-widths-used table, per-sheet table.
+function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta) {
+  const PAGE_H = 297
+  doc.addPage([PDF_PAGE_W, PAGE_H], 'portrait')
+
+  doc.setFillColor(248, 249, 252)
+  doc.rect(0, 0, PDF_PAGE_W, PAGE_H, 'F')
+
+  // Brand bar
+  doc.setFillColor(26, 31, 46)
+  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PDF_BRAND_H, 'F')
+  doc.setTextColor(226, 230, 240); doc.setFontSize(8); doc.setFont('helvetica', 'bold')
+  doc.text('OPTIROLL', PDF_PAD + 4, PDF_PAD + 6.5)
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(155, 163, 184)
+  doc.text('Cutting Plan Summary', PDF_PAD + 24, PDF_PAD + 6.5)
+  const dateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  doc.text(dateStr, PDF_PAGE_W - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
+
+  let y = PDF_PAD + PDF_BRAND_H + 14
+
+  // Title + client
+  doc.setTextColor(26, 31, 46); doc.setFont('helvetica', 'bold'); doc.setFontSize(18)
+  doc.text(meta.workOrder ? `Work Order ${meta.workOrder}` : 'Cutting Plan', PDF_PAD + 2, y)
+  y += 7
+  if (meta.client) {
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(11); doc.setTextColor(100, 116, 139)
+    doc.text(meta.client, PDF_PAD + 2, y); y += 7
+  }
+  y += 6
+
+  // Stat cards
+  const cards: [string, string][] = [
+    ['Sheets', String(meta.totalSheets ?? sheets.length)],
+    ['Pieces', meta.totalPieces != null ? String(meta.totalPieces) : '—'],
+    ['Utilization', meta.utilization != null ? `${meta.utilization}%` : '—'],
+    ['Waste', meta.waste != null ? `${meta.waste}%` : '—'],
+    ['Leftovers', meta.leftoversUsed != null ? String(meta.leftoversUsed) : '—'],
+  ]
+  const gap = 4
+  const cardW = (PDF_IMG_AREA_W - gap * (cards.length - 1)) / cards.length
+  const cardH = 18
+  cards.forEach((c, i) => {
+    const x = PDF_PAD + i * (cardW + gap)
+    doc.setFillColor(255, 255, 255); doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.3)
+    doc.roundedRect(x, y, cardW, cardH, 1.5, 1.5, 'FD')
+    doc.setTextColor(26, 31, 46); doc.setFont('helvetica', 'bold'); doc.setFontSize(13)
+    doc.text(c[1], x + cardW / 2, y + 8, { align: 'center' })
+    doc.setTextColor(148, 163, 184); doc.setFont('helvetica', 'normal'); doc.setFontSize(7)
+    doc.text(c[0].toUpperCase(), x + cardW / 2, y + 14, { align: 'center' })
+  })
+  y += cardH + 14
+
+  const tableX = PDF_PAD + 2
+  const tableW = PDF_IMG_AREA_W - 4
+
+  const drawTable = (
+    title: string,
+    cols: { label: string; w: number; align: 'left' | 'right' }[],
+    rows: string[][],
+    rowH: number,
+    maxY: number
+  ) => {
+    doc.setTextColor(26, 31, 46); doc.setFont('helvetica', 'bold'); doc.setFontSize(12)
+    doc.text(title, tableX, y); y += 6
+    // header
+    doc.setFillColor(241, 245, 249); doc.rect(tableX, y, tableW, 7, 'F')
+    doc.setFontSize(7.5); doc.setFont('helvetica', 'bold'); doc.setTextColor(100, 116, 139)
+    let cx = tableX
+    cols.forEach(col => {
+      const w = col.w * tableW
+      const tx = col.align === 'right' ? cx + w - 2 : cx + 2
+      doc.text(col.label.toUpperCase(), tx, y + 4.8, { align: col.align })
+      cx += w
+    })
+    y += 7
+    rows.forEach((vals, idx) => {
+      if (y > maxY) return
+      if (idx % 2 === 1) { doc.setFillColor(248, 250, 252); doc.rect(tableX, y, tableW, rowH, 'F') }
+      cx = tableX
+      cols.forEach((col, ci) => {
+        const w = col.w * tableW
+        const tx = col.align === 'right' ? cx + w - 2 : cx + 2
+        if (ci === 0) { doc.setFont('helvetica', 'bold'); doc.setTextColor(26, 31, 46) }
+        else { doc.setFont('helvetica', 'normal'); doc.setTextColor(51, 65, 85) }
+        doc.setFontSize(8.2)
+        doc.text(vals[ci] ?? '', tx, y + rowH / 2 + 1.3, { align: col.align })
+        cx += w
+      })
+      y += rowH
+    })
+    doc.setDrawColor(226, 232, 240); doc.setLineWidth(0.3); doc.line(tableX, y, tableX + tableW, y)
+    y += 12
+  }
+
+  // Roll widths used
+  const usage = computeRollUsage(sheets)
+  drawTable(
+    'Roll Widths Used',
+    [
+      { label: 'Roll Width', w: 0.30, align: 'left' },
+      { label: 'Sheets', w: 0.18, align: 'right' },
+      { label: 'Total Length', w: 0.26, align: 'right' },
+      { label: 'Fabric Area', w: 0.26, align: 'right' },
+    ],
+    usage.map(u => [
+      fmtRollWidth(u.width) + (u.leftover > 0 ? `  (${u.leftover} reused)` : ''),
+      String(u.sheets),
+      `${u.lengthM.toFixed(2)} m`,
+      `${u.areaM2.toFixed(2)} m²`,
+    ]),
+    7,
+    PAGE_H - 90
+  )
+
+  // Per-sheet breakdown
+  drawTable(
+    'Sheets',
+    [
+      { label: 'Sheet', w: 0.12, align: 'left' },
+      { label: 'Type', w: 0.30, align: 'left' },
+      { label: 'Roll Width', w: 0.18, align: 'right' },
+      { label: 'Length', w: 0.16, align: 'right' },
+      { label: 'Pieces', w: 0.12, align: 'right' },
+      { label: 'Util', w: 0.12, align: 'right' },
+    ],
+    sheets.map(s => [
+      `#${s.sheet_number}`,
+      s.sheet_type === 'leftover' ? 'Reused Leftover' : 'Fresh Roll',
+      fmtRollWidth(s.width),
+      `${s.length.toFixed(2)} m`,
+      String(s.blinds.length),
+      `${s.utilization}%`,
+    ]),
+    6.5,
+    PAGE_H - PDF_PAD - 18
+  )
+
+  // Footer credit + border
+  doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(148, 163, 184)
+  doc.text('Developed by Amsaif Infotech', PDF_PAGE_W / 2, PAGE_H - PDF_PAD - 4, { align: 'center' })
+  doc.setDrawColor(200, 205, 217); doc.setLineWidth(0.4)
+  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PAGE_H - PDF_PAD * 2)
+}
+
+// Download ALL sheets of a job — a summary page, then one page per sheet.
+export async function downloadAllSheetsPdf(sheets: Sheet[], meta: PdfJobMeta = {}) {
+  if (!sheets || sheets.length === 0) return
+  const { jsPDF } = await import('jspdf')
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  drawSummaryPage(doc, sheets, meta)
+  sheets.forEach(sheet => addSheetToPdf(doc, sheet, true, meta.maxRollLength))
+  doc.deletePage(1) // remove the initial blank A4 page
+  const safe = String(meta.fileName || meta.workOrder || 'cutting-map')
+    .replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'cutting-map'
+  doc.save(`${safe}-all-sheets.pdf`)
+}
+
 export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)   // fullscreen root
@@ -465,115 +814,8 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
 
   // A4 PDF — professional single-page, no scroll
   const downloadPDF = useCallback(async () => {
-    const { jsPDF } = await import('jspdf')
-
-    // A4 portrait: 210 × 297 mm
-    const PAGE_W = 210, PAGE_H = 297
-    const PAD = 9       // mm — page padding
-    const BRAND_H = 10  // mm — top branding strip
-    const FOOT_H = 14   // mm — bottom legend strip
-
-    const IMG_AREA_W = PAGE_W - PAD * 2                           // 192 mm
-    const IMG_AREA_H = PAGE_H - PAD * 2 - BRAND_H - FOOT_H       // 255 mm
-
-    // Render canvas at 150 DPI equivalent
-    const MM_TO_PX = 150 / 25.4                                   // ≈ 5.906 px/mm
-    const targetW_px = Math.round(IMG_AREA_W * MM_TO_PX)          // ≈ 1134 px
-    const targetH_px = Math.round(IMG_AREA_H * MM_TO_PX)          // ≈ 1506 px
-
-    const MAP_MARGIN = 40, MAP_TOPBAR = 64
-    const pdfScale = Math.min(
-      (targetW_px - MAP_MARGIN * 2) / canvasWidth,
-      (targetH_px - MAP_MARGIN * 2 - MAP_TOPBAR) / canvasLength
-    )
-
-    const off = document.createElement('canvas')
-    const ctx = off.getContext('2d')
-    if (!ctx) return
-    renderCutMap(ctx, sheet, pdfScale, true, showPrevious, MAP_MARGIN, MAP_TOPBAR, maxRollLength)
-    const dataUrl = off.toDataURL('image/png')
-
-    // Actual canvas size → mm at 150 DPI
-    const imgW_mm = off.width  / MM_TO_PX
-    const imgH_mm = off.height / MM_TO_PX
-
-    // Centre the image horizontally inside the image area
-    const imgX = PAD + (IMG_AREA_W - imgW_mm) / 2
-    const imgY = PAD + BRAND_H
-
-    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-
-    // ── Page background ─────────────────────────────────────────────
-    doc.setFillColor(248, 249, 252)
-    doc.rect(0, 0, PAGE_W, PAGE_H, 'F')
-
-    // ── Top branding bar ────────────────────────────────────────────
-    doc.setFillColor(26, 31, 46)
-    doc.rect(PAD, PAD, IMG_AREA_W, BRAND_H, 'F')
-
-    doc.setTextColor(226, 230, 240)
-    doc.setFontSize(8)
-    doc.setFont('helvetica', 'bold')
-    doc.text('OPTIROLL', PAD + 4, PAD + 6.5)
-
-    doc.setFont('helvetica', 'normal')
-    doc.setFontSize(7)
-    doc.setTextColor(155, 163, 184)
-    const isLeftoverSheet = sheet.sheet_type === 'leftover'
-    const sheetLabel = `Sheet #${sheet.sheet_number}  ·  ${isLeftoverSheet ? 'Reused Leftover' : 'Fresh Roll'}  ·  ${fmtRollWidth(sheet.width)} × ${sheet.length.toFixed(2)}m  ·  Util ${sheet.utilization}%`
-    doc.text(sheetLabel, PAD + 24, PAD + 6.5)
-
-    const dateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    doc.text(dateStr, PAGE_W - PAD - 4, PAD + 6.5, { align: 'right' })
-
-    // ── Cut map image ────────────────────────────────────────────────
-    doc.addImage(dataUrl, 'PNG', imgX, imgY, imgW_mm, imgH_mm)
-
-    // ── Footer separator ─────────────────────────────────────────────
-    const footerY = PAGE_H - PAD - FOOT_H
-    doc.setDrawColor(200, 205, 217)
-    doc.setLineWidth(0.25)
-    doc.line(PAD, footerY, PAGE_W - PAD, footerY)
-
-    // ── Legend chips ─────────────────────────────────────────────────
-    const ly = footerY + 5
-    let lx = PAD + 2
-    const chip = (r: number, g: number, b: number, label: string) => {
-      doc.setFillColor(r, g, b)
-      doc.roundedRect(lx, ly - 2.5, 4.5, 4.5, 0.8, 0.8, 'F')
-      doc.setFontSize(7.5)
-      doc.setTextColor(71, 85, 105)
-      doc.setFont('helvetica', 'normal')
-      doc.text(label, lx + 6, ly + 0.8)
-      lx += 6 + doc.getTextWidth(label) + 5
-    }
-    chip(37, 99, 235, 'Roller Blind')
-    chip(139, 92, 246, 'Zebra Blind')
-    chip(20, 184, 166, 'Reusable Leftover')
-    chip(239, 68, 68, 'Trim (lost)')
-
-    // ── Stats right ───────────────────────────────────────────────────
-    const reusableA = (sheet.reusable_leftovers || []).reduce((s, r) => s + r.width * r.height, 0)
-    const totalWasteA = (sheet.waste_areas || []).reduce((s, w) => s + w.width * w.height, 0)
-    const trimA = Math.max(0, totalWasteA - reusableA)
-    const cutA = sheet.width * sheet.length
-    const rPct = cutA > 0 ? ((reusableA / cutA) * 100).toFixed(1) : '0.0'
-    const tPct = cutA > 0 ? ((trimA / cutA) * 100).toFixed(1) : '0.0'
-
-    doc.setFontSize(7.5)
-    doc.setTextColor(100, 116, 139)
-    doc.text(
-      `${sheet.blinds.length} pieces  ·  Reusable ${rPct}%  ·  Trim ${tPct}%`,
-      PAGE_W - PAD - 3, ly + 0.8, { align: 'right' }
-    )
-
-    // ── Page border ───────────────────────────────────────────────────
-    doc.setDrawColor(200, 205, 217)
-    doc.setLineWidth(0.4)
-    doc.rect(PAD, PAD, IMG_AREA_W, PAGE_H - PAD * 2)
-
-    doc.save(`sheet-${sheet.sheet_number}.pdf`)
-  }, [sheet, canvasWidth, canvasLength, showPrevious, maxRollLength])
+    await downloadSheetPdf(sheet, showPrevious, maxRollLength)
+  }, [sheet, showPrevious, maxRollLength])
 
   const zoomPct = Math.round((scale / 140) * 100)
 
@@ -585,6 +827,13 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
         </span>
         <span className={`badge ${isLeftover ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
           {isLeftover ? 'LEFTOVER REUSED' : 'FRESH ROLL'}
+        </span>
+        {/* Roll width used for this sheet (widths can differ between sheets) */}
+        <span className={`badge font-mono font-bold ${isFullscreen ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+          {fmtRollWidth(sheet.width)} wide
+        </span>
+        <span className={`text-xs font-medium ${isFullscreen ? 'text-surface-400' : 'text-surface-500'}`}>
+          × {sheet.length.toFixed(2)}m · {sheet.blinds.length} pc · {sheet.utilization}% util
         </span>
         {isLeftover && (
           <span className={`text-xs font-medium ${isFullscreen ? 'text-amber-400' : 'text-amber-600'}`}>

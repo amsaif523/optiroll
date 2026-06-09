@@ -81,3 +81,22 @@ exports.delete = async (req, res, next) => {
     next(err);
   }
 };
+
+// Bulk delete: either a list of ids ({ ids: [...] }) or everything matching the
+// current filters ({ all: true, q, date_from, date_to }).
+exports.bulkDelete = async (req, res, next) => {
+  try {
+    const { ids, all, q, date_from, date_to } = req.body || {};
+    if (all) {
+      const { affected } = await Leftover.deleteAll({ q, date_from, date_to });
+      return res.json({ success: true, data: { deleted: affected } });
+    }
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'No leftover ids provided' });
+    }
+    const { affected } = await Leftover.deleteMany(ids);
+    res.json({ success: true, data: { deleted: affected } });
+  } catch (err) {
+    next(err);
+  }
+};

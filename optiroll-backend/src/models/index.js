@@ -162,7 +162,33 @@ const Leftover = {
       await pool.execute('UPDATE leftovers SET width = ?, length = ? WHERE id = ?', [width, length, id]);
     }
   },
-  delete: async (id) => pool.execute('DELETE FROM leftovers WHERE id = ?', [id])
+  delete: async (id) => pool.execute('DELETE FROM leftovers WHERE id = ?', [id]),
+  deleteMany: async (ids = []) => {
+    const list = (Array.isArray(ids) ? ids : []).map(Number).filter(Number.isInteger);
+    if (list.length === 0) return { affected: 0 };
+    const placeholders = list.map(() => '?').join(', ');
+    const [result] = await pool.execute(`DELETE FROM leftovers WHERE id IN (${placeholders})`, list);
+    return { affected: result.affectedRows || 0 };
+  },
+  // Delete every leftover matching the same filters used by findPage (search + date range).
+  deleteAll: async (filters = {}) => {
+    let where = 'WHERE 1=1';
+    const params = [];
+    if (filters.q) {
+      where += ' AND (material_type LIKE ? OR color LIKE ? OR pattern LIKE ? OR product_code LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
+    }
+    if (filters.date_from) {
+      where += ' AND created_at >= ?';
+      params.push(filters.date_from);
+    }
+    if (filters.date_to) {
+      where += ' AND created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+      params.push(filters.date_to);
+    }
+    const [result] = await pool.execute(`DELETE FROM leftovers ${where}`, params);
+    return { affected: result.affectedRows || 0 };
+  }
 };
 
 const Job = {

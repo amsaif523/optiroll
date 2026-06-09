@@ -7,26 +7,33 @@ const DEFAULT_ROLL_LENGTH = 30;
 const WIDTH_TOL = 0.001;
 const DEFAULT_CUT_MODE = 'free'; // 'free' = MAXRECTS, 'guillotine' = ShelfPacker (real cross-cuts)
 const DEFAULT_LEFTOVER_THRESHOLD = 0.8; // leftover must be ≥ X × effective roll width to qualify
+const DEEP_TIME_BUDGET_MS = 15000; // per material bucket: max wall-clock for thorough random-restart search
 
 // ─── Global optimization scoring model ──────────────────────────────────────
-// A layout (one width's full set of sheets) is scored by a weighted blend of four
+// A layout (one width's full set of sheets) is scored by a weighted blend of
 // normalized [0,1] objectives. Higher is better. This is the single objective used
 // for BOTH width selection and candidate-layout selection, so the width we pick is
 // the width we actually pack well — no selection/packing mismatch.
 //
-//   score = 0.40·utilization     within-sheet packing tightness (blind area ÷ used area)
+//   score = 0.70·utilization     fabric tightness: blind area ÷ TOTAL consumed area
 //         + 0.30·sheetEfficiency  fewest sheets vs. the area lower bound (≈ blinds/sheet)
-//         + 0.20·wasteReduction   internal gaps are minimal or at least reusable
-//         + 0.10·remnantReuse     leftover is concentrated into salvageable remnants
 //
-// utilization + sheetEfficiency drive goals 1-3 (max blinds/sheet, min waste, min sheets);
-// wasteReduction + remnantReuse encode goal 4 (keep remnants only when they're actually
-// reusable) and the "unusable vs reusable vs future-fit" distinction.
+// PRIMARY GOAL: use the fabric as completely as possible — minimize total wasted
+// fabric. `utilization` (blindArea ÷ Σ width×usedLength) already counts side strips
+// AND internal gaps as waste, so the width that leaves the least leftover scores
+// highest. `sheetEfficiency` favors consolidating onto fewer sheets.
+//
+// NOTE: earlier versions also rewarded `wasteReduction` + `remnantReuse`, which gave
+// a BONUS to layouts that left large *reusable* offcut strips. That actively pushed
+// width selection toward narrow rolls (e.g. 2.5m) that leave a big full-length side
+// strip — the opposite of "use the fabric completely". Those terms are removed: a
+// leftover is waste, not a reward. (`_layoutMetrics` still computes them for the UI
+// breakdown, but they carry zero weight in the decision.)
 const SCORE_WEIGHTS = {
-  utilization: 0.40,
+  utilization: 0.70,
   sheetEfficiency: 0.30,
-  wasteReduction: 0.20,
-  remnantReuse: 0.10,
+  wasteReduction: 0.0,
+  remnantReuse: 0.0,
 };
 
 // Decreasing sort orders for the cutting-stock packers. Sorting large pieces first
@@ -324,12 +331,15 @@ class Optimizer {
       buckets.get(key).items.push(item);
     }
 
-    // CROSS-GROUP WIDTH MERGING: within each material bucket, iteratively pick the
-    // (roll_width, item subset) assignment with the best packing score. Items whose
-    // selected_widths share a common width can now end up on the same sheet.
+    // PER-SHEET WIDTH SELECTION: each material bucket is packed as ONE group. Phase 2
+    // (see _packBucketBestLayout / _packGroupMultiWidth) chooses the roll width
+    // INDEPENDENTLY for each sheet — sheet 1 may pack best on 2.5m while sheet 2 packs
+    // best on 3.0m — so the program tries every allowed width on every sheet and keeps
+    // whichever wastes the least fabric. Every piece still only lands on a width listed
+    // in its own selected_widths.
     const finalGroups = [];
     for (const [, bucket] of buckets) {
-      // Union of all candidate widths usable in this bucket
+      // Union of all candidate widths usable anywhere in this bucket.
       const widthSet = new Set();
       for (const item of bucket.items) {
         const sw = item.selected_widths && item.selected_widths.length > 0
@@ -339,25 +349,14 @@ class Optimizer {
       }
       const candidateWidths = [...widthSet].sort((a, b) => a - b);
 
-      let unassigned = [...bucket.items];
-      while (unassigned.length > 0) {
-        const best = this._findBestAssignment(unassigned, candidateWidths, rollLength, allowRotation, cutMode, defaultWidths);
-        if (!best) {
-          const names = unassigned.map(i => `"${i.shade_number}"`).join(', ');
-          throw new Error(
-            `No roll width can fit pieces: ${names}. Check piece widths vs selected roll widths.`
-          );
-        }
-        finalGroups.push({
-          width: best.width,
-          items: best.items,
-          product_code: bucket.product_code,
-          material_type: bucket.material_type,
-          color: bucket.color,
-          pattern: bucket.pattern
-        });
-        unassigned = unassigned.filter(i => !best.items.includes(i));
-      }
+      finalGroups.push({
+        candidateWidths,
+        items: bucket.items,
+        product_code: bucket.product_code,
+        material_type: bucket.material_type,
+        color: bucket.color,
+        pattern: bucket.pattern
+      });
     }
 
     this.results = [];
@@ -375,29 +374,47 @@ class Optimizer {
     };
 
     for (const group of finalGroups) {
-      const effectiveRollWidth = group.width;
+      const candidateWidths = group.candidateWidths;
       const { product_code, material_type, color, pattern } = group;
-      if (!primaryRollWidth) primaryRollWidth = effectiveRollWidth;
+      // Reference width for the leftover-eligibility threshold (smallest usable width).
+      const leftoverRefWidth = Math.min(...candidateWidths);
 
-      // Per-group suggestion (for UI display)
-      const sug = this.simulatePacking(group.items, effectiveRollWidth, rollLength, allowRotation, cutMode);
-      if (!allSuggestions.some(e => Math.abs(e.width - sug.width) < WIDTH_TOL)) allSuggestions.push(sug);
+      // Per-width suggestions (for UI display): simulate each candidate width over the
+      // items eligible at that width.
+      for (const w of candidateWidths) {
+        const eligibleItems = group.items.filter(it => {
+          const sw = it.selected_widths && it.selected_widths.length > 0 ? it.selected_widths : defaultWidths;
+          return sw.some(v => Math.abs(v - w) < WIDTH_TOL);
+        });
+        if (eligibleItems.length === 0) continue;
+        const sug = this.simulatePacking(eligibleItems, w, rollLength, allowRotation, cutMode);
+        if (!allSuggestions.some(e => Math.abs(e.width - sug.width) < WIDTH_TOL)) allSuggestions.push(sug);
+      }
       const groupSheetStart = sheetCounter;
 
-      // Build blind queue for this group
+      // Build blind queue for this group. Each piece carries the set of roll widths it
+      // may be packed on, so the per-sheet width selector only places it on a legal width.
       this.blindQueue = [];
+      let itemIdx = 0;
       for (const item of group.items) {
         const qty = parseInt(item.quantity) || 1;
         const valence = parseFloat(item.valence || 0);
         const cut = parseFloat(item.cut) || 0;
         const orderedWidth = parseFloat(item.width);
         const effWidth = orderedWidth - cut; // fabric actually cut from the roll
+        const allowedWidths = (item.selected_widths && item.selected_widths.length > 0)
+          ? [...item.selected_widths]
+          : [...defaultWidths];
         const finalHeight = item.blind_type === 'zebra'
           ? (parseFloat(item.height) * 2) + valence
           : parseFloat(item.height) + valence;
         for (let i = 0; i < qty; i++) {
           this.blindQueue.push({
-            id: `${item.shade_number || 'item'}_${i}`,
+            // id MUST be globally unique. shade_number can repeat across items (e.g. an
+            // imported Excel where many rows share the same Product Name), so the item
+            // index is included — otherwise pieces with the same id get removed together
+            // and silently dropped during packing.
+            id: `${item.shade_number || 'item'}_${itemIdx}_${i}`,
             shade_number: item.shade_number || '',
             blind_type: item.blind_type,
             width: effWidth,           // packed/plotted width = ordered width − cut
@@ -408,10 +425,12 @@ class Optimizer {
             final_height: finalHeight,
             piece_index: i,
             grain_locked: item.grain_locked === true,
+            allowed_widths: allowedWidths,
             product_code: item.product_code || product_code || null,
             material_type, color, pattern
           });
         }
+        itemIdx++;
       }
 
       // PHASE 1: SMART leftover packing (skipped when use_leftovers=false)
@@ -419,7 +438,7 @@ class Optimizer {
       if (this.useLeftovers) {
         const leftovers = await Leftover.findByProductOrSignature(product_code, material_type, color, pattern);
         eligibleLeftovers = leftovers.filter(l =>
-          parseFloat(l.width) >= effectiveRollWidth * leftoverThreshold
+          parseFloat(l.width) >= leftoverRefWidth * leftoverThreshold
         );
       }
 
@@ -531,13 +550,16 @@ class Optimizer {
       if (this.blindQueue.length > 0) {
         let deepOrder = null;
         if (mode === 'deep') {
+          // GA produces a piece-ordering hint; the multi-width packer still re-selects
+          // the width per sheet. Seed it at the widest candidate so every piece fits.
           deepOrder = this._runGAForGroup(
-            this.blindQueue, effectiveRollWidth, rollLength, allowRotation, cutMode
+            this.blindQueue, Math.max(...candidateWidths), rollLength, allowRotation, cutMode
           );
         }
 
-        const layout = this._packGroupBestLayout(
-          this.blindQueue, effectiveRollWidth, rollLength, allowRotation, cutMode, deepOrder, false
+        const layout = this._packBucketBestLayout(
+          this.blindQueue, candidateWidths, rollLength, allowRotation, cutMode, deepOrder,
+          mode, mode === 'deep' ? DEEP_TIME_BUDGET_MS : 0
         );
 
         if (!layout.allFit) {
@@ -545,7 +567,8 @@ class Optimizer {
           throw new Error(
             `Cannot place blind "${b.shade_number || '?'}" ` +
             `(${(b.width || 0).toFixed(5)}m × ${(b.final_height || 0).toFixed(5)}m) ` +
-            `on a ${effectiveRollWidth}m × ${rollLength}m roll. Check dimensions and units.`
+            `on any of the selected roll widths [${candidateWidths.join(', ')}]m × ${rollLength}m. ` +
+            `Check dimensions and units.`
           );
         }
 
@@ -593,8 +616,13 @@ class Optimizer {
         );
       }
 
+      // Widths actually used across this group's committed sheets (may be mixed).
+      const widthsUsed = [...new Set(this.results.slice(groupSheetStart).map(s => s.width))]
+        .sort((a, b) => a - b);
+      if (primaryRollWidth == null && widthsUsed.length > 0) primaryRollWidth = widthsUsed[0];
       rollWidthGroups.push({
-        roll_width: effectiveRollWidth,
+        roll_width: widthsUsed[0] || 0,
+        roll_widths: widthsUsed,
         material_type, color, pattern,
         item_count: group.items.length,
         sheets: sheetCounter - groupSheetStart
@@ -699,6 +727,7 @@ class Optimizer {
   // simulation/scoring. grain_locked is carried so rotation behavior matches reality.
   _buildSimQueue(items) {
     const queue = [];
+    let itemIdx = 0;
     for (const item of items) {
       const qty = parseInt(item.quantity) || 1;
       const valence = parseFloat(item.valence || 0);
@@ -708,7 +737,8 @@ class Optimizer {
       const effWidth = parseFloat(item.width) - (parseFloat(item.cut) || 0);
       for (let i = 0; i < qty; i++) {
         queue.push({
-          id: `sim_${item.shade_number || 'item'}_${i}`,
+          // Globally-unique id (shade_number may repeat across items — see blindQueue note).
+          id: `sim_${item.shade_number || 'item'}_${itemIdx}_${i}`,
           shade_number: item.shade_number || '',
           width: effWidth,
           final_height: finalHeight,
@@ -716,6 +746,7 @@ class Optimizer {
           grain_locked: item.grain_locked === true,
         });
       }
+      itemIdx++;
     }
     return queue;
   }
@@ -888,6 +919,165 @@ class Optimizer {
       if (m.score > bestScore) { bestScore = m.score; bestSheets = sheets; }
     }
     return { sheets: bestSheets, allFit: true, score: bestScore };
+  }
+
+  // ─── Per-sheet width selection ──────────────────────────────────────────────
+  // Best full layout for a bucket whose pieces may legally use several roll widths.
+  // Several candidate layouts are generated and compared by `_betterLayout` (least
+  // wasted fabric first, fewer rolls as a strong tiebreak):
+  //   1. Multi-width greedy, "tight" — each sheet uses the width that packs the
+  //      remaining pieces most densely (highest per-sheet utilization).
+  //   2. Multi-width greedy, "fill" — each sheet uses the width that packs the MOST
+  //      pieces (fills the roll fullest → tends to use fewer rolls).
+  //   3. Uniform-width layouts — whole bucket on one width (widths that fit every piece).
+  //   4. (Thorough mode only) time-boxed random-restart search that keeps the best
+  //      layout found and stops early once it stalls.
+  // Guarantees the result is never worse than the single-width approach.
+  _packBucketBestLayout(queue, candidateWidths, rollLength, allowRotation, cutMode, deepOrder = null, mode = 'quick', timeBudgetMs = 0) {
+    const live = [...queue].filter(p => p != null);
+    let best = null;
+    const consider = (sheets) => {
+      if (!sheets || sheets.length === 0) return;
+      if (!best || this._betterLayout(sheets, best)) best = sheets;
+    };
+
+    for (const criterion of ['tight', 'fill']) {
+      const mw = this._packGroupMultiWidth(live, candidateWidths, rollLength, allowRotation, cutMode, criterion);
+      if (mw.allFit) consider(mw.sheets);
+    }
+
+    for (const w of candidateWidths) {
+      const allEligible = live.every(p =>
+        this._pieceAllowsWidth(p, w) && this._pieceFits(p, w, rollLength, allowRotation)
+      );
+      if (!allEligible) continue;
+      const layout = this._packGroupBestLayout(live, w, rollLength, allowRotation, cutMode, deepOrder, false);
+      if (layout.allFit) consider(layout.sheets);
+    }
+
+    // Thorough search: ε-greedy restarts over the WIDTH-ASSIGNMENT space, within a
+    // wall-clock budget. Each restart runs the same strong per-sheet packer but, with
+    // probability ε, deliberately picks a non-best width for a sheet — escaping the
+    // greedy's local optimum so different roll-width combinations get tried. Keeps the
+    // best layout found; early-stops after long stagnation so it never burns the full
+    // budget for nothing.
+    if (mode === 'deep' && timeBudgetMs > 0 && best) {
+      const deadline = Date.now() + timeBudgetMs;
+      let stale = 0;
+      while (Date.now() < deadline && stale < 800) {
+        const criterion = Math.random() < 0.5 ? 'tight' : 'fill';
+        const r = this._packGroupMultiWidth(live, candidateWidths, rollLength, allowRotation, cutMode, criterion, null, 0.35);
+        if (r.allFit && this._betterLayout(r.sheets, best)) { best = r.sheets; stale = 0; }
+        else stale++;
+      }
+    }
+
+    if (!best) {
+      const mw = this._packGroupMultiWidth(live, candidateWidths, rollLength, allowRotation, cutMode, 'tight');
+      return { sheets: mw.sheets, allFit: false };
+    }
+    return { sheets: best, allFit: true };
+  }
+
+  // Total cost of a full layout. Used by `_betterLayout`.
+  //   rolls      = number of sheets (each = one opened roll)
+  //   area       = total fabric consumed (Σ width × usedLength)
+  //   blindArea  = sum of placed piece areas
+  // waste = area − blindArea (side strips + internal gaps within the used region).
+  _layoutCost(sheets) {
+    let area = 0, blindArea = 0;
+    for (const s of sheets) {
+      area += s.rollWidth * s.usedLength;
+      for (const p of s.placed) blindArea += p.width * p.height;
+    }
+    return { rolls: sheets.length, area, blindArea, waste: area - blindArea };
+  }
+
+  // Is layout `a` better than layout `b`?
+  // Priority: (1) least wasted fabric, bucketed so near-ties don't thrash; within a
+  // bucket (2) fewer rolls (honors "prefer fewer rolls"); then (3) exact least waste.
+  _betterLayout(a, b) {
+    const AREA_TOL = 0.25; // m² — treat layouts within this much waste as "equal" on waste
+    const ca = this._layoutCost(a), cb = this._layoutCost(b);
+    if (Math.abs(ca.waste - cb.waste) > AREA_TOL) return ca.waste < cb.waste;
+    if (ca.rolls !== cb.rolls) return ca.rolls < cb.rolls;
+    return ca.waste < cb.waste - 1e-9;
+  }
+
+  // Multi-width greedy: fill one sheet at a time; each sheet uses the candidate width
+  // that, by `criterion`, serves the goal best. Pieces only land on a width they allow.
+  //   criterion 'tight' → highest per-sheet utilization (least waste on this sheet).
+  //   criterion 'fill'  → most pieces placed on this sheet (fills the roll fullest →
+  //                       fewer rolls overall), utilization as the tiebreak.
+  //   explore (0..1)    → with this probability, pick a RANDOM eligible width for a sheet
+  //                       instead of the best — used by the thorough search to escape the
+  //                       greedy's local optimum. 0 = pure greedy (deterministic).
+  //   order             → if given, pack pieces in this exact order (force_order).
+  _packGroupMultiWidth(queue, candidateWidths, rollLength, allowRotation, cutMode, criterion = 'tight', order = null, explore = 0) {
+    const widths = [...candidateWidths].sort((a, b) => a - b);
+    let remaining = order ? [...order] : [...queue].filter(p => p != null);
+    const forceOrder = !!order;
+    const sheets = [];
+
+    const scoreOf = (placed, util) =>
+      criterion === 'fill' ? placed.length + util * 1e-3 : util;
+
+    while (remaining.length > 0) {
+      const cands = [];
+      for (const w of widths) {
+        const eligible = remaining.filter(p =>
+          this._pieceAllowsWidth(p, w) && this._pieceFits(p, w, rollLength, allowRotation)
+        );
+        if (eligible.length === 0) continue;
+        const { placed, freeRects } = this._packOneSheet(eligible, w, rollLength, allowRotation, cutMode, forceOrder);
+        if (placed.length === 0) continue;
+        const usedLength = Math.max(...placed.map(p => p.y + p.height));
+        const blindArea = placed.reduce((s, p) => s + p.width * p.height, 0);
+        const util = (w * usedLength) > 0 ? blindArea / (w * usedLength) : 0;
+        cands.push({ width: w, placed, freeRects, usedLength, util, score: scoreOf(placed, util) });
+      }
+      if (cands.length === 0) return { sheets, allFit: false };
+
+      const pick = (explore > 0 && cands.length > 1 && Math.random() < explore)
+        ? cands[Math.floor(Math.random() * cands.length)]
+        : cands.reduce((a, b) => (b.score > a.score + 1e-9 ? b : a));
+
+      sheets.push({
+        rollWidth: pick.width, rollLength,
+        usedLength: pick.usedLength, placed: pick.placed, freeRects: pick.freeRects
+      });
+      const done = new Set(pick.placed.map(p => `${p.id}|${p.piece_index}`));
+      remaining = remaining.filter(p => !done.has(`${p.id}|${p.piece_index}`));
+    }
+    return { sheets, allFit: true };
+  }
+
+  // Pack a single sheet from an explicit piece list without disturbing this.blindQueue.
+  // forceOrder=true packs pieces in the given order (no internal re-sorting).
+  _packOneSheet(pieces, width, rollLength, allowRotation, cutMode, forceOrder = false) {
+    const saved = this.blindQueue;
+    this.blindQueue = [...pieces];
+    const { placed, freeRects } = this.packSheet({
+      width, length: rollLength, allow_rotation: allowRotation, cut_mode: cutMode, force_order: forceOrder
+    });
+    this.blindQueue = saved;
+    return { placed, freeRects };
+  }
+
+  // A piece may be packed on width `w` if its allowed_widths set includes w
+  // (an empty/missing set means "any width").
+  _pieceAllowsWidth(piece, w) {
+    const aw = piece.allowed_widths;
+    if (!aw || aw.length === 0) return true;
+    return aw.some(v => Math.abs(v - w) < WIDTH_TOL);
+  }
+
+  // Dimensional fit of a single piece on a width × rollLength sheet (rotation-aware).
+  _pieceFits(piece, w, rollLength, allowRotation) {
+    const fitsNormal = piece.width <= w && piece.final_height <= rollLength;
+    const fitsRotated = allowRotation && !piece.grain_locked &&
+      piece.final_height <= w && piece.width <= rollLength;
+    return fitsNormal || fitsRotated;
   }
 
   // Deep Optimise: Order-based GA. Chromosome = permutation of the queue.
@@ -1067,6 +1257,9 @@ class Optimizer {
       for (let i = 0; i < sheets.length; i++) {
         if (i === srcIdx) continue;
         const target = sheets[i];
+
+        // Don't move pieces onto a roll width they aren't allowed on.
+        if (source.placed.some(p => !this._pieceAllowsWidth(p, target.rollWidth))) continue;
 
         const combinedItems = [
           ...target.placed.map(p => this._asQueueItem(p)),

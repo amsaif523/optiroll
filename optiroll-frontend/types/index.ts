@@ -69,6 +69,7 @@ export interface RollWidthSuggestion {
 
 export interface RollWidthGroup {
   roll_width: number
+  roll_widths?: number[]   // distinct widths actually used across this group's sheets
   material_type: string
   color: string
   pattern: string | null

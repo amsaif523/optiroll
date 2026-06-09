@@ -1,13 +1,13 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ReactNode } from 'react'
 import DataTable, { TableColumn } from 'react-data-table-component'
 import { DateRange } from 'react-date-range'
 import type { Range, RangeKeyDict } from 'react-date-range'
 import { WorkOrderItem, OptimizeResponse, AppSettings, Sheet } from '@/types'
 import WorkOrderBuilder from '@/components/WorkOrderBuilder'
-import CutMapCanvas from '@/components/CutMapCanvas'
+import CutMapCanvas, { downloadAllSheetsPdf } from '@/components/CutMapCanvas'
 import SettingsPanel from '@/components/SettingsPanel'
 import GuideView from '@/components/GuideView'
 import InventoryView from '@/components/InventoryView'
@@ -17,7 +17,7 @@ import {
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList, Database,
-  Search, ChevronLeft, ChevronRight, Plus, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen
+  Search, ChevronLeft, ChevronRight, Plus, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen, Download
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -173,6 +173,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<OptimizeResponse | null>(null)
   const [resultSaved, setResultSaved] = useState(false)
+  const [downloadingAll, setDownloadingAll] = useState(false)
   const [useLeftovers, setUseLeftovers] = useState(true)
   const [confirmSaving, setConfirmSaving] = useState(false)
   const [leftoverSel, setLeftoverSel] = useState<Set<number>>(new Set())
@@ -362,9 +363,23 @@ export default function Home() {
 
   const initials = user?.full_name ? getInitials(user.full_name) : user?.username?.slice(0, 2).toUpperCase() ?? 'OP'
 
-  // Best suggestion (excluding the one already used)
-  const usedSuggestion = result?.roll_width_suggestions?.find(s => s.width === result.roll_width)
-  const alternateSuggestion = result?.roll_width_suggestions?.find(s => s.width !== result.roll_width)
+  // Roll widths actually used across all committed sheets (widths may be mixed within
+  // one job — each sheet is packed on whichever allowed width wastes the least fabric).
+  const rollUsage = (() => {
+    if (!result) return [] as { width: number; sheets: number; fresh: number; leftover: number; lengthM: number; areaM2: number }[]
+    const map = new Map<number, { width: number; sheets: number; fresh: number; leftover: number; lengthM: number; areaM2: number }>()
+    for (const s of result.sheets) {
+      const e = map.get(s.width) || { width: s.width, sheets: 0, fresh: 0, leftover: 0, lengthM: 0, areaM2: 0 }
+      e.sheets += 1
+      if (s.sheet_type === 'leftover') e.leftover += 1; else e.fresh += 1
+      e.lengthM += s.length
+      e.areaM2 += s.width * s.length
+      map.set(s.width, e)
+    }
+    return Array.from(map.values()).sort((a, b) => a.width - b.width)
+  })()
+  const totalFabricLength = rollUsage.reduce((sum, u) => sum + u.lengthM, 0)
+  const totalFabricArea = rollUsage.reduce((sum, u) => sum + u.areaM2, 0)
 
   const SIDEBAR_ITEMS = [
     { icon: <HomeIcon size={18} />, label: 'Dashboard', tab: 'dashboard' as ActiveTab },
@@ -662,6 +677,34 @@ export default function Home() {
                         </div>
                         <div className="flex items-center gap-2">
                           <button
+                            onClick={async () => {
+                              if (!result || downloadingAll) return
+                              setDownloadingAll(true)
+                              try {
+                                await downloadAllSheetsPdf(result.sheets, {
+                                  maxRollLength: result.max_roll_length,
+                                  workOrder: result.work_order_number,
+                                  client: result.client_name,
+                                  totalPieces: result.total_pieces,
+                                  totalSheets: result.total_sheets,
+                                  utilization: result.utilization_percent,
+                                  waste: result.waste_percent,
+                                  leftoversUsed: result.total_leftovers_used,
+                                  fileName: result.work_order_number || 'cutting-map',
+                                })
+                              } catch (err: unknown) {
+                                setError(err instanceof Error ? err.message : 'Download failed')
+                              }
+                              setDownloadingAll(false)
+                            }}
+                            disabled={downloadingAll || result.sheets.length === 0}
+                            title="Download every sheet as one multi-page PDF"
+                            className="btn-ghost flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 disabled:opacity-50"
+                          >
+                            {downloadingAll ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                            Download All
+                          </button>
+                          <button
                             onClick={() => setShowPiecesModal(true)}
                             className="btn-ghost flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5"
                           >
@@ -681,18 +724,29 @@ export default function Home() {
                           <Stat icon={<Recycle size={14} />} value={result.total_leftovers_used} label="Leftovers Used" color="text-amber-600" />
                         </div>
 
-                        {/* Which roll was chosen and why */}
-                        <div className="mt-3 flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                          <TrendingUp size={14} className="text-emerald-600 shrink-0" />
-                          <span className="text-xs text-emerald-700 font-medium">
-                            Auto-selected: <strong>{fmtRollWidth(result.roll_width)}</strong> roll
-                            {usedSuggestion && ` — ${usedSuggestion.utilization}% utilization, ${usedSuggestion.sheets} sheet(s)`}
-                            {alternateSuggestion && (
-                              <span className="text-emerald-500 font-normal">
-                                {' '}(next best: {fmtRollWidth(alternateSuggestion.width)} at {alternateSuggestion.utilization}%)
+                        {/* Roll widths actually used (mixed widths allowed per sheet) */}
+                        <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2.5">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <TrendingUp size={14} className="text-emerald-600 shrink-0" />
+                              <span className="text-[11px] font-bold text-emerald-700 uppercase tracking-wider">Roll Widths Used</span>
+                            </div>
+                            <span className="text-[11px] text-emerald-600 font-medium">
+                              {totalFabricLength.toFixed(2)}m fabric · {totalFabricArea.toFixed(2)}m²
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {rollUsage.map(u => (
+                              <span key={u.width} className="inline-flex items-center gap-1.5 bg-white border border-emerald-200 rounded-lg px-2.5 py-1 text-xs">
+                                <strong className="text-emerald-700 font-mono">{fmtRollWidth(u.width)}</strong>
+                                <span className="text-surface-500">{u.sheets} sheet{u.sheets !== 1 ? 's' : ''}</span>
+                                <span className="text-surface-400">· {u.lengthM.toFixed(2)}m · {u.areaM2.toFixed(2)}m²</span>
+                                {u.leftover > 0 && (
+                                  <span className="badge bg-amber-50 text-amber-700 border border-amber-200 text-[10px]">{u.leftover} reused</span>
+                                )}
                               </span>
-                            )}
-                          </span>
+                            ))}
+                          </div>
                         </div>
 
                         {result.total_leftovers_used > 0 ? (
@@ -706,10 +760,91 @@ export default function Home() {
                           <div className="mt-2 flex items-center gap-2 bg-surface-50 border border-surface-200 rounded-lg px-3 py-2">
                             <Package size={14} className="text-surface-400" />
                             <span className="text-xs text-surface-500">
-                              No matching leftovers found. Used fresh {fmtRollWidth(result.roll_width)} roll.
+                              No matching leftovers found. Used fresh roll{rollUsage.length > 1 ? 's' : ''}.
                             </span>
                           </div>
                         )}
+                      </div>
+                    </div>
+
+                    {/* JOB SUMMARY — roll widths used + per-sheet breakdown */}
+                    <div className="panel">
+                      <div className="panel-header">
+                        <div className="flex items-center gap-2">
+                          <ClipboardList size={16} className="text-brand-600" />
+                          <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Job Summary</h3>
+                        </div>
+                        <span className="text-xs text-surface-400">
+                          {result.total_sheets} sheet{result.total_sheets !== 1 ? 's' : ''} · {totalFabricLength.toFixed(2)}m fabric · {totalFabricArea.toFixed(2)}m²
+                        </span>
+                      </div>
+                      <div className="panel-body space-y-5">
+                        {/* Roll widths used */}
+                        <div>
+                          <p className="text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-2">Roll Widths Used</p>
+                          <div className="overflow-x-auto rounded-lg border border-surface-200">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="bg-surface-50 text-[10px] font-bold text-surface-400 uppercase tracking-wider">
+                                  <th className="text-left px-3 py-2">Roll Width</th>
+                                  <th className="text-right px-3 py-2">Sheets</th>
+                                  <th className="text-right px-3 py-2">Total Length</th>
+                                  <th className="text-right px-3 py-2">Fabric Area</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-surface-100">
+                                {rollUsage.map(u => (
+                                  <tr key={u.width} className="text-surface-700">
+                                    <td className="px-3 py-2 font-mono font-bold text-brand-700">
+                                      {fmtRollWidth(u.width)}
+                                      {u.leftover > 0 && (
+                                        <span className="ml-2 badge bg-amber-50 text-amber-700 border border-amber-200 text-[10px]">{u.leftover} reused</span>
+                                      )}
+                                    </td>
+                                    <td className="px-3 py-2 text-right font-mono">{u.sheets}</td>
+                                    <td className="px-3 py-2 text-right font-mono">{u.lengthM.toFixed(2)}m</td>
+                                    <td className="px-3 py-2 text-right font-mono">{u.areaM2.toFixed(2)}m²</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+
+                        {/* Per-sheet breakdown */}
+                        <div>
+                          <p className="text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-2">Sheets</p>
+                          <div className="overflow-x-auto rounded-lg border border-surface-200">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="bg-surface-50 text-[10px] font-bold text-surface-400 uppercase tracking-wider">
+                                  <th className="text-left px-3 py-2">Sheet</th>
+                                  <th className="text-left px-3 py-2">Type</th>
+                                  <th className="text-right px-3 py-2">Roll Width</th>
+                                  <th className="text-right px-3 py-2">Length</th>
+                                  <th className="text-right px-3 py-2">Pieces</th>
+                                  <th className="text-right px-3 py-2">Util</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-surface-100">
+                                {result.sheets.map(s => (
+                                  <tr key={s.sheet_number} className="text-surface-700">
+                                    <td className="px-3 py-2 font-bold text-surface-800">#{s.sheet_number}</td>
+                                    <td className="px-3 py-2">
+                                      <span className={`badge border text-[10px] ${s.sheet_type === 'leftover' ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+                                        {s.sheet_type === 'leftover' ? 'Reused Leftover' : 'Fresh Roll'}
+                                      </span>
+                                    </td>
+                                    <td className="px-3 py-2 text-right font-mono font-bold text-brand-700">{fmtRollWidth(s.width)}</td>
+                                    <td className="px-3 py-2 text-right font-mono">{s.length.toFixed(2)}m</td>
+                                    <td className="px-3 py-2 text-right font-mono">{s.blinds.length}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-emerald-600">{s.utilization}%</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1628,6 +1763,11 @@ function LeftoversView() {
   const [statsLoading, setStatsLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Bulk selection / delete
+  const [selectedRows, setSelectedRows] = useState<LeftoverSummary[]>([])
+  const [clearSelToggle, setClearSelToggle] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+
   // Add leftover modal
   const [addOpen, setAddOpen] = useState(false)
   const [addForm, setAddForm] = useState(EMPTY_LEFTOVER_FORM)
@@ -1776,6 +1916,55 @@ function LeftoversView() {
     }
   }
 
+  // react-data-table fires this on every selection change; memoized to avoid an
+  // update loop (the lib re-runs its effect when the handler identity changes).
+  const handleSelectedChange = useCallback(
+    ({ selectedRows: rows }: { selectedRows: LeftoverSummary[] }) => setSelectedRows(rows),
+    []
+  )
+
+  const deleteSelected = async () => {
+    if (selectedRows.length === 0 || bulkDeleting) return
+    if (!confirm(`Delete ${selectedRows.length} selected leftover(s)? This cannot be undone.`)) return
+    setBulkDeleting(true)
+    setError('')
+    try {
+      await apiFetch('/leftovers/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedRows.map(r => r.id) }),
+      })
+      setSelectedRows([])
+      setClearSelToggle(t => !t)
+      setPage(1)
+      await loadLeftovers()
+      await loadStats()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete leftovers')
+    }
+    setBulkDeleting(false)
+  }
+
+  const deleteAll = async () => {
+    if (total === 0 || bulkDeleting) return
+    if (!confirm(`Delete ALL ${total} leftover(s) matching the current filters? This cannot be undone.`)) return
+    setBulkDeleting(true)
+    setError('')
+    try {
+      await apiFetch('/leftovers/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ all: true, q: filters.q, date_from: filters.date_from, date_to: filters.date_to }),
+      })
+      setSelectedRows([])
+      setClearSelToggle(t => !t)
+      setPage(1)
+      await loadLeftovers()
+      await loadStats()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete leftovers')
+    }
+    setBulkDeleting(false)
+  }
+
   const columns: TableColumn<LeftoverSummary>[] = [
     { name: 'ID', selector: row => row.id, sortable: true, cell: row => <span className="font-bold text-surface-800">#{row.id}</span>, width: '80px' },
     { name: 'Product Code', selector: row => row.product_code || '', sortable: true, cell: row => row.product_code ? <span className="font-mono text-xs text-brand-700 font-bold">{row.product_code}</span> : <span className="text-surface-300">—</span>, minWidth: '130px' },
@@ -1832,6 +2021,23 @@ function LeftoversView() {
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-surface-800">Leftovers</h2>
         <div className="flex gap-2">
+          {selectedRows.length > 0 && (
+            <button
+              onClick={deleteSelected}
+              disabled={bulkDeleting}
+              className="flex items-center gap-1.5 text-sm px-3 py-2 rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+            >
+              {bulkDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete Selected ({selectedRows.length})
+            </button>
+          )}
+          <button
+            onClick={deleteAll}
+            disabled={bulkDeleting || total === 0}
+            title="Delete all leftovers matching the current filters"
+            className="flex items-center gap-1.5 text-sm px-3 py-2 rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {bulkDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Delete All
+          </button>
           <button onClick={() => { setAddForm(EMPTY_LEFTOVER_FORM); setAddError(''); setAddOpen(true) }} className="btn-brand flex items-center gap-1.5 text-sm px-3 py-2">
             <Plus size={15} /> Add Leftover
           </button>
@@ -2001,6 +2207,10 @@ function LeftoversView() {
         <DataTable
           columns={columns}
           data={leftovers}
+          keyField="id"
+          selectableRows
+          onSelectedRowsChange={handleSelectedChange}
+          clearSelectedRows={clearSelToggle}
           progressPending={loading}
           customStyles={dataTableStyles}
           pagination
