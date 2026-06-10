@@ -169,9 +169,9 @@ export default function GuideView() {
               (GST, Total, Rounding Off) are silently dropped. When you&apos;re happy, click <Pill>Confirm &amp; Import</Pill>.
             </Step>
             <Callout type="tip" title="Sensible defaults">
-              If your file doesn&apos;t have a Valence, Material, Colour, Pattern, or Roll Widths column, OptiRoll
-              fills in safe defaults — Valence <b>6&quot;</b>, Material <b>Polyester</b>, Colour <b>White</b>,
-              Pattern <b>Plain</b>, Roll Widths <b>All available</b>. You can edit any piece later if needed.
+              If your file doesn&apos;t have a Valence or Roll Widths column, OptiRoll
+              fills in safe defaults — Valence <b>6&quot;</b>, Roll Widths <b>All available</b>.
+              You can edit any piece later if needed.
             </Callout>
           </Card>
 
@@ -208,10 +208,11 @@ export default function GuideView() {
               How many of this exact piece. The system will replicate it on the sheets that many times.
             </FieldRow>
 
-            <FieldRow label="Material / Colour / Pattern">
-              Three free-text fields describing the fabric. Pieces with <b>different</b> material, colour, or
-              pattern are <b>never</b> placed on the same sheet — they go on separate sheets even if dimensions
-              would fit together. This is what keeps your job physically cuttable from one roll at a time.
+            <FieldRow icon={<Hash size={13} />} label="Shade">
+              The fabric identity. Pieces with the <b>same</b> shade share sheets; pieces with a
+              <b> different</b> shade are <b>never</b> placed on the same sheet — they go on separate sheets even
+              if their dimensions would fit together. This is what keeps your job physically cuttable from one
+              roll at a time, and it&apos;s also how leftover offcuts are matched for reuse.
             </FieldRow>
 
             <FieldRow label="Roll Width for This Piece">
@@ -333,7 +334,7 @@ export default function GuideView() {
           <Card id="leftovers" icon={<Recycle size={16} />} title="Leftovers & Reuse">
             <p>
               When a sheet is cut, the unused tail of the roll (and any large rectangular off-cuts) are saved
-              automatically. The next time you run a job with the same material, colour, and pattern, OptiRoll
+              automatically. The next time you run a job with the same <b>shade</b>, OptiRoll
               tries to use these leftovers <b>before</b> cutting into a fresh roll.
             </p>
             <p>
@@ -369,13 +370,13 @@ export default function GuideView() {
           {/* Tips */}
           <Card id="tips" icon={<Lightbulb size={16} />} title="Tips & Common Issues">
             <Callout type="warn" title='"Why are 3 pieces using 3 sheets?"'>
-              Each unique <b>Material + Colour + Pattern</b> combination becomes its own sheet — different fabrics
-              physically can&apos;t be cut from the same roll. If your three pieces are <i>Polyester / White</i>,
-              <i>Polyester / Beige</i>, and <i>Blackout / Grey</i>, the optimizer must use three sheets even if
-              they would fit dimensionally. To consolidate, give the pieces the same fabric values.
+              Each unique <b>shade</b> becomes its own sheet — different fabrics
+              physically can&apos;t be cut from the same roll. If your three pieces are three different shades,
+              the optimizer must use three sheets even if they would fit dimensionally. To consolidate, give the
+              pieces the same shade.
             </Callout>
             <Callout type="tip" title="Group like with like">
-              Pieces with the same material / colour / pattern share sheets and pack much better. Avoid splitting
+              Pieces with the same shade share sheets and pack much better. Avoid splitting
               a fabric across two work orders if you can run them as one.
             </Callout>
             <Callout type="tip" title="Pick more than one roll width per piece">

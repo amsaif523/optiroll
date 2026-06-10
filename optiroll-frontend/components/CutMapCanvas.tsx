@@ -15,7 +15,8 @@ const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 // Show inch value without trailing zeros (e.g. 47.5 not 47.50000, 47.1234 not 47.12340)
 const fmtIn = (meters: number): string => parseFloat((meters / 0.0254).toFixed(5)).toString()
 
-// tickStep  = tick spacing in meters (0.1 for both axes)
+// Rulers are drawn in INCHES. `scale` is px-per-METER (the canvas geometry stays in
+// meters); ticks/labels are converted to inches so the plotted scale reads in inches.
 // rightSide = true → draw Y ruler on the RIGHT edge (ticks + labels face right)
 function drawRuler(
   ctx: CanvasRenderingContext2D,
@@ -24,62 +25,71 @@ function drawRuler(
   originX: number,
   originY: number,
   axis: 'x' | 'y',
-  tickStep = 0.1,
   rightSide = false
 ) {
   if (totalMeters <= 0) return
-  const MIN_PX = 30
+  const M_TO_IN = 1 / 0.0254
+  const totalIn = totalMeters * M_TO_IN
+  const pxPerIn = scale / M_TO_IN
+  const MIN_PX = 34
   ctx.font = '10px Inter, sans-serif'
   ctx.fillStyle = '#8b93a7'
   ctx.strokeStyle = '#b0b8cc'
   ctx.lineWidth = 1
 
-  // Smallest NICE multiplier so labels stay >= MIN_PX apart
-  const NICE = [1, 2, 2.5, 5, 10, 20, 50]
-  const minMult = (tickStep * scale) < MIN_PX ? Math.ceil(MIN_PX / (tickStep * scale)) : 1
-  const mult = NICE.find(n => n >= minMult) ?? 50
-  const placedPx: number[] = []
+  // Smallest NICE inch step whose label spacing stays >= MIN_PX apart
+  const NICE = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500]
+  const labelStep = NICE.find(n => n * pxPerIn >= MIN_PX) ?? 1000
+  // Minor ticks at 1/5 of the label step, unless that gets too dense to be useful
+  const tickStep = (labelStep / 5) * pxPerIn >= 4 ? labelStep / 5 : labelStep
+  const endPx = totalIn * pxPerIn
+  const placed: number[] = []
 
-  const drawOne = (v: number, isEdge: boolean) => {
-    const px = v * scale
-    const onLabel = isEdge || Math.round(v / tickStep) % mult === 0
-    const label = v < 0.000001 ? '0' : fmtRollWidth(v)
-
+  const drawTick = (vIn: number) => {
+    const px = vIn * pxPerIn
     if (axis === 'x') {
       const cx = originX + px
-      if (!isEdge) { ctx.beginPath(); ctx.moveTo(cx, originY); ctx.lineTo(cx, originY - 4); ctx.stroke() }
-      if (onLabel && !placedPx.some(p => Math.abs(p - cx) < MIN_PX)) {
-        ctx.textAlign = cx <= originX + 15 ? 'left' : (cx >= originX + totalMeters * scale - 15 ? 'right' : 'center')
-        ctx.fillText(label, cx, originY - 8)
-        placedPx.push(cx)
-      }
+      ctx.beginPath(); ctx.moveTo(cx, originY); ctx.lineTo(cx, originY - 4); ctx.stroke()
     } else {
       const cy = originY + px
-      if (!isEdge) {
-        ctx.beginPath()
-        ctx.moveTo(originX, cy)
-        ctx.lineTo(rightSide ? originX + 4 : originX - 4, cy)
-        ctx.stroke()
-      }
-      if (onLabel && !placedPx.some(p => Math.abs(p - cy) < MIN_PX)) {
-        if (rightSide) {
-          ctx.textAlign = 'left'
-          ctx.fillText(label, originX + 8, cy + 3.5)
-        } else {
-          ctx.textAlign = 'right'
-          ctx.fillText(label, originX - 8, cy + 3.5)
-        }
-        placedPx.push(cy)
-      }
+      ctx.beginPath(); ctx.moveTo(originX, cy); ctx.lineTo(rightSide ? originX + 4 : originX - 4, cy); ctx.stroke()
     }
   }
 
-  drawOne(0, true)
-  const nTicks = Math.ceil(totalMeters / tickStep)
-  for (let i = 1; i < nTicks; i++) {
-    drawOne(parseFloat((i * tickStep).toFixed(8)), false)
+  const drawLabel = (vIn: number) => {
+    const px = vIn * pxPerIn
+    const label = vIn < 0.0001 ? '0' : `${parseFloat(vIn.toFixed(2))}"`
+    if (axis === 'x') {
+      const cx = originX + px
+      if (placed.some(p => Math.abs(p - cx) < MIN_PX)) return
+      ctx.textAlign = cx <= originX + 15 ? 'left' : (cx >= originX + endPx - 15 ? 'right' : 'center')
+      ctx.fillText(label, cx, originY - 8)
+      placed.push(cx)
+    } else {
+      const cy = originY + px
+      if (placed.some(p => Math.abs(p - cy) < MIN_PX)) return
+      if (rightSide) { ctx.textAlign = 'left';  ctx.fillText(label, originX + 8, cy + 3.5) }
+      else           { ctx.textAlign = 'right'; ctx.fillText(label, originX - 8, cy + 3.5) }
+      placed.push(cy)
+    }
   }
-  drawOne(totalMeters, true)
+
+  // Minor ticks
+  const minorCount = Math.floor(totalIn / tickStep)
+  for (let i = 1; i <= minorCount; i++) {
+    const v = i * tickStep
+    if (v >= totalIn - 0.0001) break
+    drawTick(v)
+  }
+  // Labels at 0, every labelStep, and the far edge
+  drawLabel(0)
+  const labelCount = Math.floor(totalIn / labelStep)
+  for (let i = 1; i <= labelCount; i++) {
+    const v = i * labelStep
+    if (v >= totalIn - 0.0001) break
+    drawLabel(v)
+  }
+  drawLabel(totalIn)
 }
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -161,6 +171,9 @@ function renderCutMap(
   ctx.fillStyle = '#f8f9fc'
   ctx.fillRect(0, 0, cw, ch)
 
+  // Internal dark header bar — skipped when TOPBAR is 0 (e.g. tiled print pages, which
+  // carry their own per-page header chrome).
+  if (TOPBAR > 0) {
   ctx.fillStyle = '#1a1f2e'
   ctx.fillRect(0, 0, cw, TOPBAR)
   ctx.fillStyle = '#e2e6f0'
@@ -192,6 +205,7 @@ function renderCutMap(
     const tailLabel = tailLength > 0
       ? `  ·  +${tailLength.toFixed(2)}m tail saved as leftover (${tailArea.toFixed(2)}m²)` : ''
     ctx.fillText(`Util ${sheet.utilization}%  ·  Reusable ${reusablePct.toFixed(1)}%  ·  Trim ${trimPct.toFixed(1)}%  ·  ${sheet.blinds.length} pieces${tailLabel}`, MARGIN, 44)
+  }
   }
 
   ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#c8cdd9'; ctx.lineWidth = 1.5
@@ -358,10 +372,10 @@ function renderCutMap(
     }
   }
 
-  // Width ruler (top, 0.1 m ticks) + length rulers (left + right, 0.1 m ticks)
-  drawRuler(ctx, canvasWidth,  scale, MARGIN,      MARGIN + TOPBAR, 'x', 0.1)
-  drawRuler(ctx, canvasLength, scale, MARGIN,      MARGIN + TOPBAR, 'y', 0.1, false)
-  drawRuler(ctx, canvasLength, scale, MARGIN + sw, MARGIN + TOPBAR, 'y', 0.1, true)
+  // Width ruler (top) + length rulers (left + right) — all in inches
+  drawRuler(ctx, canvasWidth,  scale, MARGIN,      MARGIN + TOPBAR, 'x')
+  drawRuler(ctx, canvasLength, scale, MARGIN,      MARGIN + TOPBAR, 'y', false)
+  drawRuler(ctx, canvasLength, scale, MARGIN + sw, MARGIN + TOPBAR, 'y', true)
 }
 
 const MARGIN = 60
@@ -382,16 +396,17 @@ const PDF_MAP_TOPBAR = 64         // px — internal sheet header inside the ren
 // Draws the page chrome (background, branding bar, footer legend + stats, border)
 // onto the CURRENT page of the doc. `pageH` is the height of the current page (mm),
 // since each sheet gets its own page sized to the roll.
-function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageH: number) {
+function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageW: number, pageH: number) {
   const isLeftover = sheet.sheet_type === 'leftover'
+  const imgAreaW = pageW - PDF_PAD * 2
 
   // ── Page background ─────────────────────────────────────────────
   doc.setFillColor(248, 249, 252)
-  doc.rect(0, 0, PDF_PAGE_W, pageH, 'F')
+  doc.rect(0, 0, pageW, pageH, 'F')
 
   // ── Top branding bar ────────────────────────────────────────────
   doc.setFillColor(26, 31, 46)
-  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PDF_BRAND_H, 'F')
+  doc.rect(PDF_PAD, PDF_PAD, imgAreaW, PDF_BRAND_H, 'F')
 
   doc.setTextColor(226, 230, 240)
   doc.setFontSize(8)
@@ -405,12 +420,12 @@ function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageH: number) {
   doc.text(sheetLabel, PDF_PAD + 24, PDF_PAD + 6.5)
 
   const dateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-  doc.text(dateStr, PDF_PAGE_W - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
+  doc.text(dateStr, pageW - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
 
   // ── Sheet info strip (width badge etc., right next to the cut map) ───────────
   const infoY = PDF_PAD + PDF_BRAND_H
   doc.setFillColor(255, 255, 255)
-  doc.rect(PDF_PAD, infoY, PDF_IMG_AREA_W, PDF_INFO_H, 'F')
+  doc.rect(PDF_PAD, infoY, imgAreaW, PDF_INFO_H, 'F')
   const infoMidY = infoY + 5.6
   let ix = PDF_PAD + 3
 
@@ -445,7 +460,7 @@ function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageH: number) {
   const footerY = pageH - PDF_PAD - PDF_FOOT_H
   doc.setDrawColor(200, 205, 217)
   doc.setLineWidth(0.25)
-  doc.line(PDF_PAD, footerY, PDF_PAGE_W - PDF_PAD, footerY)
+  doc.line(PDF_PAD, footerY, pageW - PDF_PAD, footerY)
 
   // ── Legend chips ─────────────────────────────────────────────────
   const ly = footerY + 5
@@ -476,19 +491,19 @@ function drawPdfChrome(doc: JsPDFType, sheet: Sheet, pageH: number) {
   doc.setTextColor(100, 116, 139)
   doc.text(
     `${sheet.blinds.length} pieces  ·  Reusable ${rPct}%  ·  Trim ${tPct}%`,
-    PDF_PAGE_W - PDF_PAD - 3, ly + 0.8, { align: 'right' }
+    pageW - PDF_PAD - 3, ly + 0.8, { align: 'right' }
   )
 
   // ── Developed-by credit ───────────────────────────────────────────
   doc.setFontSize(6.5)
   doc.setFont('helvetica', 'normal')
   doc.setTextColor(148, 163, 184)
-  doc.text('Developed by Amsaif Infotech', PDF_PAGE_W / 2, ly + 6, { align: 'center' })
+  doc.text('Developed by Amsaif Infotech', pageW / 2, ly + 6, { align: 'center' })
 
   // ── Page border ───────────────────────────────────────────────────
   doc.setDrawColor(200, 205, 217)
   doc.setLineWidth(0.4)
-  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, pageH - PDF_PAD * 2)
+  doc.rect(PDF_PAD, PDF_PAD, imgAreaW, pageH - PDF_PAD * 2)
 }
 
 // Adds ONE sheet as ONE page. The page keeps a fixed A4 width but its HEIGHT grows to
@@ -514,11 +529,79 @@ function addSheetToPdf(doc: JsPDFType, sheet: Sheet, showPrevious: boolean, maxR
   const pageH = PDF_PAD * 2 + PDF_BRAND_H + PDF_INFO_H + imgH_mm + PDF_FOOT_H
 
   doc.addPage([PDF_PAGE_W, pageH], 'portrait')
-  drawPdfChrome(doc, sheet, pageH)
+  drawPdfChrome(doc, sheet, PDF_PAGE_W, pageH)
 
   const imgX = PDF_PAD + (PDF_IMG_AREA_W - imgW_mm) / 2
   const imgY = PDF_PAD + PDF_BRAND_H + PDF_INFO_H
   doc.addImage(off.toDataURL('image/png'), 'PNG', imgX, imgY, imgW_mm, imgH_mm)
+}
+
+// ── Print pipeline (fixed A-series pages) ────────────────────────────────────
+// Unlike the download (which grows each page's height to fit the whole roll on one
+// page), printing uses real fixed paper sizes so it lands cleanly on a physical
+// printer. Each sheet is scaled to fit ONE page (preserving aspect ratio, centred).
+export type PageFormat = 'a3' | 'a4' | 'a5'
+export const PAGE_DIMS: Record<PageFormat, { w: number; h: number; label: string }> = {
+  a3: { w: 297, h: 420, label: 'A3' },
+  a4: { w: 210, h: 297, label: 'A4' },
+  a5: { w: 148, h: 210, label: 'A5' },
+}
+
+// Adds ONE sheet across as many fixed-size pages as needed. The roll fills the page
+// WIDTH at a readable scale, then is tiled down its LENGTH — each page shows a portion
+// at full size with a clean page break, instead of squashing the whole roll onto one
+// page. Short rolls still produce a single page.
+function addSheetToFixedPage(doc: JsPDFType, sheet: Sheet, showPrevious: boolean, dims: { w: number; h: number }, maxRollLength?: number) {
+  const isLeftover = sheet.sheet_type === 'leftover'
+  const canvasWidth  = (isLeftover && (sheet.original_width  || 0) > 0) ? sheet.original_width  : sheet.width
+  const canvasLength = (isLeftover && (sheet.original_length || 0) > 0) ? sheet.original_length : sheet.length
+
+  const imgAreaW = dims.w - PDF_PAD * 2
+  const bandTop  = PDF_PAD + PDF_BRAND_H + PDF_INFO_H               // top of the cut-map band
+  const bandH_mm = dims.h - bandTop - PDF_FOOT_H - PDF_PAD          // band height per page (mm)
+  const bandH_px = bandH_mm * PDF_MM_TO_PX
+  const areaW_px = imgAreaW * PDF_MM_TO_PX
+
+  // Fill the page WIDTH so pieces stay readable; cap so the offscreen canvas stays within
+  // the browser's max canvas dimension even for very long rolls.
+  const MAX_CANVAS_PX = 14000
+  let scale = (areaW_px - PDF_MAP_MARGIN * 2) / canvasWidth
+  scale = Math.min(scale, (MAX_CANVAS_PX - PDF_MAP_MARGIN * 2) / Math.max(canvasLength, 0.01))
+
+  const off = document.createElement('canvas')
+  const ctx = off.getContext('2d')
+  if (!ctx) return
+  // TOPBAR = 0 → no internal dark header; each PDF page supplies its own header chrome.
+  renderCutMap(ctx, sheet, scale, true, showPrevious, PDF_MAP_MARGIN, 0, maxRollLength)
+
+  const fullW = off.width
+  const fullH = off.height
+  const drawW = Math.min(fullW / PDF_MM_TO_PX, imgAreaW)
+  const imgX  = PDF_PAD + (imgAreaW - drawW) / 2
+  const pages = Math.max(1, Math.ceil(fullH / bandH_px))
+
+  for (let p = 0; p < pages; p++) {
+    const sy = p * bandH_px
+    const sH = Math.min(bandH_px, fullH - sy)
+
+    // Blit this vertical band into its own canvas, then place it on a fresh page.
+    const slice = document.createElement('canvas')
+    slice.width  = fullW
+    slice.height = Math.max(1, Math.ceil(sH))
+    const sctx = slice.getContext('2d')
+    if (!sctx) continue
+    sctx.fillStyle = '#f8f9fc'
+    sctx.fillRect(0, 0, slice.width, slice.height)
+    sctx.drawImage(off, 0, sy, fullW, sH, 0, 0, fullW, sH)
+
+    doc.addPage([dims.w, dims.h], 'portrait')
+    drawPdfChrome(doc, sheet, dims.w, dims.h)
+    if (pages > 1) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(100, 116, 139)
+      doc.text(`Page ${p + 1} / ${pages}`, dims.w - PDF_PAD - 3, PDF_PAD + PDF_BRAND_H + 6, { align: 'right' })
+    }
+    doc.addImage(slice.toDataURL('image/png'), 'PNG', imgX, bandTop, drawW, sH / PDF_MM_TO_PX)
+  }
 }
 
 // Per-sheet download — one page sized to the roll.
@@ -558,23 +641,24 @@ function computeRollUsage(sheets: Sheet[]) {
   return Array.from(map.values()).sort((a, b) => a.width - b.width)
 }
 
-// A4 summary page: job totals, roll-widths-used table, per-sheet table.
-function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta) {
-  const PAGE_H = 297
-  doc.addPage([PDF_PAGE_W, PAGE_H], 'portrait')
+// Summary page: job totals, roll-widths-used table, per-sheet table.
+// pageW/PAGE_H default to A4; print passes the chosen A-series size.
+function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta, pageW = PDF_PAGE_W, PAGE_H = 297) {
+  const imgAreaW = pageW - PDF_PAD * 2
+  doc.addPage([pageW, PAGE_H], 'portrait')
 
   doc.setFillColor(248, 249, 252)
-  doc.rect(0, 0, PDF_PAGE_W, PAGE_H, 'F')
+  doc.rect(0, 0, pageW, PAGE_H, 'F')
 
   // Brand bar
   doc.setFillColor(26, 31, 46)
-  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PDF_BRAND_H, 'F')
+  doc.rect(PDF_PAD, PDF_PAD, imgAreaW, PDF_BRAND_H, 'F')
   doc.setTextColor(226, 230, 240); doc.setFontSize(8); doc.setFont('helvetica', 'bold')
   doc.text('OPTIROLL', PDF_PAD + 4, PDF_PAD + 6.5)
   doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(155, 163, 184)
   doc.text('Cutting Plan Summary', PDF_PAD + 24, PDF_PAD + 6.5)
   const dateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-  doc.text(dateStr, PDF_PAGE_W - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
+  doc.text(dateStr, pageW - PDF_PAD - 4, PDF_PAD + 6.5, { align: 'right' })
 
   let y = PDF_PAD + PDF_BRAND_H + 14
 
@@ -597,7 +681,7 @@ function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta) {
     ['Leftovers', meta.leftoversUsed != null ? String(meta.leftoversUsed) : '—'],
   ]
   const gap = 4
-  const cardW = (PDF_IMG_AREA_W - gap * (cards.length - 1)) / cards.length
+  const cardW = (imgAreaW - gap * (cards.length - 1)) / cards.length
   const cardH = 18
   cards.forEach((c, i) => {
     const x = PDF_PAD + i * (cardW + gap)
@@ -611,7 +695,7 @@ function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta) {
   y += cardH + 14
 
   const tableX = PDF_PAD + 2
-  const tableW = PDF_IMG_AREA_W - 4
+  const tableW = imgAreaW - 4
 
   const drawTable = (
     title: string,
@@ -697,9 +781,9 @@ function drawSummaryPage(doc: JsPDFType, sheets: Sheet[], meta: PdfJobMeta) {
 
   // Footer credit + border
   doc.setFontSize(7); doc.setFont('helvetica', 'normal'); doc.setTextColor(148, 163, 184)
-  doc.text('Developed by Amsaif Infotech', PDF_PAGE_W / 2, PAGE_H - PDF_PAD - 4, { align: 'center' })
+  doc.text('Developed by Amsaif Infotech', pageW / 2, PAGE_H - PDF_PAD - 4, { align: 'center' })
   doc.setDrawColor(200, 205, 217); doc.setLineWidth(0.4)
-  doc.rect(PDF_PAD, PDF_PAD, PDF_IMG_AREA_W, PAGE_H - PDF_PAD * 2)
+  doc.rect(PDF_PAD, PDF_PAD, imgAreaW, PAGE_H - PDF_PAD * 2)
 }
 
 // Download ALL sheets of a job — a summary page, then one page per sheet.
@@ -715,18 +799,47 @@ export async function downloadAllSheetsPdf(sheets: Sheet[], meta: PdfJobMeta = {
   doc.save(`${safe}-all-sheets.pdf`)
 }
 
+// Print ALL sheets — fixed A-series pages (A3/A4/A5), summary + one page per sheet,
+// sent straight to the browser print dialog via a hidden iframe.
+export async function printAllSheets(sheets: Sheet[], meta: PdfJobMeta = {}, format: PageFormat = 'a4') {
+  if (!sheets || sheets.length === 0) return
+  const { jsPDF } = await import('jspdf')
+  const dims = PAGE_DIMS[format] || PAGE_DIMS.a4
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [dims.w, dims.h] })
+  drawSummaryPage(doc, sheets, meta, dims.w, dims.h)
+  sheets.forEach(sheet => addSheetToFixedPage(doc, sheet, true, dims, meta.maxRollLength))
+  doc.deletePage(1) // remove the initial blank page
+  doc.autoPrint()
+
+  // Load the PDF into a hidden iframe and trigger the print dialog.
+  const blob = doc.output('blob')
+  const url = URL.createObjectURL(blob)
+  document.getElementById('optiroll-print-frame')?.remove()
+  const iframe = document.createElement('iframe')
+  iframe.id = 'optiroll-print-frame'
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;'
+  iframe.src = url
+  iframe.onload = () => {
+    try { iframe.contentWindow?.focus(); iframe.contentWindow?.print() } catch { /* ignore */ }
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  }
+  document.body.appendChild(iframe)
+}
+
 export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)   // fullscreen root
   const scrollRef    = useRef<HTMLDivElement>(null)   // pan/scroll area
 
   const [scale, setScale]         = useState(140)
+  const [fitScale, setFitScale]   = useState(140)   // scale that fits the roll to the panel width = 100%
   const [showLabels, setShowLabels]   = useState(true)
   const [showPrevious, setShowPrevious] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isDragging, setIsDragging]   = useState(false)
 
   const dragRef = useRef({ active: false, startX: 0, startY: 0, scrollLeft: 0, scrollTop: 0 })
+  const userZoomedRef = useRef(false)   // once the user zooms, stop auto-fitting on resize
 
   const isLeftover  = sheet.sheet_type === 'leftover'
   const hasPrevious = isLeftover && sheet.previous_blinds && sheet.previous_blinds.length > 0
@@ -749,18 +862,29 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [])
 
-  // Wheel zoom — non-passive so we can preventDefault to stop scroll
+  // A new sheet re-fits to the panel width (clears any prior manual zoom).
+  useEffect(() => { userZoomedRef.current = false }, [sheet])
+
+  // Fit the roll WIDTH to the panel on mount / resize, so the plot opens at full width
+  // (= 100%). Zoom is button-only now — the wheel just scrolls the container normally.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const handler = (e: WheelEvent) => {
-      e.preventDefault()
-      const step = e.deltaY > 0 ? -15 : 15
-      setScale(s => Math.min(500, Math.max(30, s + step)))
+    const computeFit = () => {
+      const avail = el.clientWidth - MARGIN * 2 - 8
+      if (avail <= 0) return
+      let fit = avail / canvasWidth
+      // Cap so very long rolls don't build an enormous canvas.
+      fit = Math.min(fit, 9000 / Math.max(canvasLength, 0.1), 600)
+      fit = Math.max(20, fit)
+      setFitScale(fit)
+      if (!userZoomedRef.current) setScale(fit)
     }
-    el.addEventListener('wheel', handler, { passive: false })
-    return () => el.removeEventListener('wheel', handler)
-  }, [])
+    computeFit()
+    const ro = new ResizeObserver(computeFit)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [canvasWidth, canvasLength, sheet])
 
   // Drag-to-pan handlers
   const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -788,8 +912,12 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
   const resetView = () => {
     const el = scrollRef.current
     if (el) { el.scrollLeft = 0; el.scrollTop = 0 }
-    setScale(140)
+    userZoomedRef.current = false
+    setScale(fitScale)
   }
+
+  const zoomIn  = () => { userZoomedRef.current = true; setScale(s => Math.min(2000, s * 1.25)) }
+  const zoomOut = () => { userZoomedRef.current = true; setScale(s => Math.max(20, s / 1.25)) }
 
   const toggleFullscreen = async () => {
     if (!containerRef.current) return
@@ -817,7 +945,7 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
     await downloadSheetPdf(sheet, showPrevious, maxRollLength)
   }, [sheet, showPrevious, maxRollLength])
 
-  const zoomPct = Math.round((scale / 140) * 100)
+  const zoomPct = Math.round((scale / fitScale) * 100)
 
   const toolbar = (
     <div className={`flex items-center justify-between gap-2 ${isFullscreen ? 'px-4 py-3 bg-surface-900 border-b border-surface-700 shrink-0' : 'panel-header'}`}>
@@ -856,13 +984,13 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
 
         {/* Zoom controls */}
         <div className={`flex items-center gap-0.5 mx-1 px-2 py-0.5 rounded-lg ${isFullscreen ? 'bg-surface-800' : 'bg-surface-100'}`}>
-          <button onClick={() => setScale(s => Math.max(30, s - 20))} className="btn-ghost p-1" title="Zoom out (or scroll down)">
+          <button onClick={zoomOut} className="btn-ghost p-1" title="Zoom out">
             <ZoomOut size={13} />
           </button>
           <span className={`text-[11px] font-mono font-bold w-10 text-center ${isFullscreen ? 'text-surface-200' : 'text-surface-600'}`}>
             {zoomPct}%
           </span>
-          <button onClick={() => setScale(s => Math.min(500, s + 20))} className="btn-ghost p-1" title="Zoom in (or scroll up)">
+          <button onClick={zoomIn} className="btn-ghost p-1" title="Zoom in">
             <ZoomIn size={13} />
           </button>
         </div>
@@ -877,7 +1005,7 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
           <FileText size={14} />
         </button>
         <button onClick={toggleFullscreen} className={`btn-ghost p-1.5 ml-1 ${isFullscreen ? 'text-surface-300' : ''}`}
-          title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen (drag to pan, scroll to zoom)'}>
+          title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen (drag to pan)'}>
           {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </button>
       </div>
@@ -886,7 +1014,7 @@ export default function CutMapCanvas({ sheet, maxRollLength }: Props) {
 
   const hint = (
     <p className={`text-[10px] mt-1.5 ${isFullscreen ? 'text-surface-500' : 'text-surface-400'}`}>
-      Drag to pan · Scroll to zoom · {zoomPct}% · {scale}px/m
+      Drag to pan · Scroll to move · Zoom with the +/− buttons · {zoomPct}%
     </p>
   )
 

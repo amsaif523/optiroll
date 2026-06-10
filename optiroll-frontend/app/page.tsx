@@ -7,7 +7,7 @@ import { DateRange } from 'react-date-range'
 import type { Range, RangeKeyDict } from 'react-date-range'
 import { WorkOrderItem, OptimizeResponse, AppSettings, Sheet } from '@/types'
 import WorkOrderBuilder from '@/components/WorkOrderBuilder'
-import CutMapCanvas, { downloadAllSheetsPdf } from '@/components/CutMapCanvas'
+import CutMapCanvas, { downloadAllSheetsPdf, printAllSheets, type PageFormat } from '@/components/CutMapCanvas'
 import SettingsPanel from '@/components/SettingsPanel'
 import GuideView from '@/components/GuideView'
 import InventoryView from '@/components/InventoryView'
@@ -17,7 +17,8 @@ import {
   Package, Recycle, Menu, X, Home as HomeIcon, Settings,
   FolderOpen, History, LogOut, List, Eye, TrendingUp, RotateCcw,
   Users, UserPlus, Shield, RefreshCw, Trash2, ClipboardList, Database,
-  Search, ChevronLeft, ChevronRight, Plus, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen, Download
+  Search, ChevronLeft, ChevronRight, Plus, PlusCircle, CalendarDays, ChevronDown, Sparkles, Lightbulb, Lock, BookOpen, Download,
+  PanelLeftClose, PanelLeftOpen, Printer
 } from 'lucide-react'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000/api'
@@ -63,9 +64,6 @@ interface LeftoverSummary {
   original_roll_id: number | null
   width: number
   length: number
-  material_type: string
-  color: string
-  pattern: string | null
   product_code: string | null
   shades: string | null
   status: string
@@ -173,7 +171,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<OptimizeResponse | null>(null)
   const [resultSaved, setResultSaved] = useState(false)
+  // After a cutting map is generated, the work-order editing panel collapses to a slim
+  // rail so the results take the full width. Toggled manually via the rail / collapse button.
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [downloadingAll, setDownloadingAll] = useState(false)
+  const [printing, setPrinting] = useState(false)
+  const [printSize, setPrintSize] = useState<PageFormat>('a4')
   const [useLeftovers, setUseLeftovers] = useState(true)
   const [confirmSaving, setConfirmSaving] = useState(false)
   const [leftoverSel, setLeftoverSel] = useState<Set<number>>(new Set())
@@ -249,6 +252,7 @@ export default function Home() {
       const data = await res.json()
       if (!res.ok || !data.success) throw new Error(data.error || 'Optimization failed')
       setResult(data.data)
+      setLeftCollapsed(true) // collapse the editing panel so the cut map gets full width
       // If rotation was enabled, show which pieces got rotated
       if (allowRotation) {
         const M_TO_IN = 1 / 0.0254
@@ -343,8 +347,7 @@ export default function Home() {
             )).join(', ') || null
             return {
               width: l.width, length: l.length,
-              material_type: l.material_type, color: l.color,
-              pattern: l.pattern, product_code: l.product_code ?? null,
+              product_code: l.product_code ?? null,
               sheet_number: l.sheet_number,
               shades: sheetShades,
             }
@@ -521,53 +524,76 @@ export default function Home() {
           ) : activeTab === 'guide' ? (
             <GuideView />
           ) : activeTab === 'workorder' ? (
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
+            <div className="flex flex-col xl:flex-row gap-5 items-start">
 
-              {/* LEFT COLUMN */}
-              <div className="xl:col-span-4 space-y-4">
-                <div className="panel">
-                  <div className="panel-header">
-                    <div className="flex items-center gap-2">
-                      <FileText size={15} className="text-brand-600" />
-                      <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Job Identity</h3>
-                    </div>
-                  </div>
-                  <div className="panel-body space-y-3">
-                    <div>
-                      <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Work Order #</label>
-                      <input value={workOrderNumber} onChange={e => setWorkOrderNumber(e.target.value)} placeholder="WO-2024-001" className="w-full" />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Client Name</label>
-                      <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="Acme Corporation" className="w-full" />
-                    </div>
-                  </div>
-                </div>
-
-                <WorkOrderBuilder
-                  items={items}
-                  onChange={setItems}
-                  availableWidths={appSettings.roll_widths}
-                  allowRotation={allowRotation}
-                  onAllowRotationChange={setAllowRotation}
-                  cutMode={cutMode}
-                  onCutModeChange={setCutMode}
-                />
-
-                {/* Max roll length hint */}
-                <div className="flex items-center justify-between text-xs text-surface-400 px-1">
-                  <span>Max roll length: <strong className="text-surface-600">{appSettings.max_roll_length}m</strong></span>
+              {/* LEFT COLUMN — collapses to a slim rail once a cut map is generated */}
+              <div className={`w-full shrink-0 transition-all duration-300 ${result && leftCollapsed ? 'xl:w-14' : 'xl:w-[34%]'}`}>
+                {result && leftCollapsed ? (
                   <button
-                    onClick={() => setActiveTab('settings')}
-                    className="text-brand-500 hover:text-brand-700 font-medium underline underline-offset-2"
+                    onClick={() => setLeftCollapsed(false)}
+                    title="Edit work order"
+                    className="panel w-full flex xl:flex-col items-center justify-center gap-2 py-3 xl:py-6 hover:bg-surface-50 transition-colors"
                   >
-                    Change in Settings
+                    <PanelLeftOpen size={18} className="text-brand-600 shrink-0" />
+                    <span className="text-[11px] font-bold text-surface-500 uppercase tracking-wider xl:[writing-mode:vertical-rl] xl:rotate-180">
+                      Edit Work Order
+                    </span>
                   </button>
-                </div>
+                ) : (
+                  <div className="space-y-4">
+                    {result && (
+                      <button
+                        onClick={() => setLeftCollapsed(true)}
+                        className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-surface-500 hover:text-surface-700 py-2 rounded-xl border border-surface-200 bg-white hover:bg-surface-50 transition-colors"
+                      >
+                        <PanelLeftClose size={14} /> Collapse panel
+                      </button>
+                    )}
+                    <div className="panel">
+                      <div className="panel-header">
+                        <div className="flex items-center gap-2">
+                          <FileText size={15} className="text-brand-600" />
+                          <h3 className="text-sm font-bold text-surface-700 uppercase tracking-wide">Job Identity</h3>
+                        </div>
+                      </div>
+                      <div className="panel-body space-y-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Work Order #</label>
+                          <input value={workOrderNumber} onChange={e => setWorkOrderNumber(e.target.value)} placeholder="WO-2024-001" className="w-full" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Client Name</label>
+                          <input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="Acme Corporation" className="w-full" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <WorkOrderBuilder
+                      items={items}
+                      onChange={setItems}
+                      availableWidths={appSettings.roll_widths}
+                      allowRotation={allowRotation}
+                      onAllowRotationChange={setAllowRotation}
+                      cutMode={cutMode}
+                      onCutModeChange={setCutMode}
+                    />
+
+                    {/* Max roll length hint */}
+                    <div className="flex items-center justify-between text-xs text-surface-400 px-1">
+                      <span>Max roll length: <strong className="text-surface-600">{appSettings.max_roll_length}m</strong></span>
+                      <button
+                        onClick={() => setActiveTab('settings')}
+                        className="text-brand-500 hover:text-brand-700 font-medium underline underline-offset-2"
+                      >
+                        Change in Settings
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* RIGHT COLUMN */}
-              <div className="xl:col-span-8 space-y-3">
+              <div className="flex-1 min-w-0 w-full space-y-3">
 
                 {/* Smart suggestions: reads current items + settings and recommends tweaks */}
                 <SmartSuggestions
@@ -704,6 +730,48 @@ export default function Home() {
                             {downloadingAll ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
                             Download All
                           </button>
+
+                          {/* Print All — fixed A-series pages, sent to the print dialog */}
+                          <div className="flex items-center rounded-lg border border-surface-200 overflow-hidden">
+                            <select
+                              value={printSize}
+                              onChange={e => setPrintSize(e.target.value as PageFormat)}
+                              title="Paper size for printing"
+                              className="text-xs font-bold text-surface-600 bg-surface-50 border-0 border-r border-surface-200 py-1.5 pl-2 pr-1 outline-none focus:ring-0 cursor-pointer"
+                            >
+                              <option value="a3">A3</option>
+                              <option value="a4">A4</option>
+                              <option value="a5">A5</option>
+                            </select>
+                            <button
+                              onClick={async () => {
+                                if (!result || printing) return
+                                setPrinting(true)
+                                try {
+                                  await printAllSheets(result.sheets, {
+                                    maxRollLength: result.max_roll_length,
+                                    workOrder: result.work_order_number,
+                                    client: result.client_name,
+                                    totalPieces: result.total_pieces,
+                                    totalSheets: result.total_sheets,
+                                    utilization: result.utilization_percent,
+                                    waste: result.waste_percent,
+                                    leftoversUsed: result.total_leftovers_used,
+                                  }, printSize)
+                                } catch (err: unknown) {
+                                  setError(err instanceof Error ? err.message : 'Print failed')
+                                }
+                                setPrinting(false)
+                              }}
+                              disabled={printing || result.sheets.length === 0}
+                              title={`Print every sheet (${printSize.toUpperCase()})`}
+                              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 text-brand-600 hover:bg-brand-50 disabled:opacity-50"
+                            >
+                              {printing ? <Loader2 size={13} className="animate-spin" /> : <Printer size={13} />}
+                              Print All
+                            </button>
+                          </div>
+
                           <button
                             onClick={() => setShowPiecesModal(true)}
                             className="btn-ghost flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5"
@@ -921,12 +989,8 @@ export default function Home() {
                                         <span className="text-[11px] text-surface-500 font-mono shrink-0">{areaM2} m²</span>
                                         {/* Product code */}
                                         {l.product_code && (
-                                          <span className="badge bg-brand-50 text-brand-700 border border-brand-200 shrink-0 font-mono">{l.product_code}</span>
+                                          <span className="badge bg-brand-50 text-brand-700 border border-brand-200 shrink-0 font-mono ml-auto">{l.product_code}</span>
                                         )}
-                                        {/* Material info */}
-                                        <span className="text-[11px] text-surface-400 ml-auto truncate">
-                                          {[l.material_type, l.color, l.pattern].filter(Boolean).join(' · ')}
-                                        </span>
                                         {/* Saved tick */}
                                         {leftoversSavedState && isSelected && (
                                           <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
@@ -1700,8 +1764,6 @@ function WorkOrderDetailPage({
                 <th className="px-4 py-3 text-right">H"</th>
                 <th className="px-4 py-3 text-right">Val"</th>
                 <th className="px-4 py-3 text-right">Qty</th>
-                <th className="px-4 py-3 text-left">Material</th>
-                <th className="px-4 py-3 text-left">Color</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-100">
@@ -1713,8 +1775,6 @@ function WorkOrderDetailPage({
                   <td className="px-4 py-3 text-right font-mono">{parseFloat((Number(item.height) / 0.0254).toFixed(5)).toString()}</td>
                   <td className="px-4 py-3 text-right font-mono">{parseFloat((Number(item.valence || 0) / 0.0254).toFixed(5)).toString()}</td>
                   <td className="px-4 py-3 text-right font-bold">{item.quantity}</td>
-                  <td className="px-4 py-3">{item.material_type}</td>
-                  <td className="px-4 py-3">{item.color}</td>
                 </tr>
               ))}
             </tbody>
@@ -1741,8 +1801,7 @@ function WorkOrderDetailPage({
 }
 
 const EMPTY_LEFTOVER_FORM = {
-  width: '', length: '', material_type: '', color: '',
-  pattern: '', product_code: '', shades: '',
+  width: '', length: '', product_code: '', shades: '',
 }
 
 function LeftoversView() {
@@ -1836,8 +1895,7 @@ function LeftoversView() {
   const handleAddLeftover = async () => {
     setAddError('')
     const wIn = parseFloat(addForm.width), lIn = parseFloat(addForm.length)
-    if (!addForm.material_type.trim()) { setAddError('Material is required'); return }
-    if (!addForm.color.trim()) { setAddError('Color is required'); return }
+    if (!addForm.shades.trim()) { setAddError('At least one shade is required'); return }
     if (!Number.isFinite(wIn) || wIn <= 0) { setAddError('Width must be a positive number (inches)'); return }
     if (!Number.isFinite(lIn) || lIn <= 0) { setAddError('Length must be a positive number (inches)'); return }
     const wM = wIn * IN_TO_M, lM = lIn * IN_TO_M
@@ -1847,11 +1905,8 @@ function LeftoversView() {
         method: 'POST',
         body: JSON.stringify({
           width: wM, length: lM,
-          material_type: addForm.material_type.trim(),
-          color: addForm.color.trim(),
-          pattern: addForm.pattern.trim() || null,
           product_code: addForm.product_code.trim() || null,
-          shades: addForm.shades.trim() || null,
+          shades: addForm.shades.trim(),
         }),
       })
       setAddOpen(false)
@@ -1968,9 +2023,6 @@ function LeftoversView() {
   const columns: TableColumn<LeftoverSummary>[] = [
     { name: 'ID', selector: row => row.id, sortable: true, cell: row => <span className="font-bold text-surface-800">#{row.id}</span>, width: '80px' },
     { name: 'Product Code', selector: row => row.product_code || '', sortable: true, cell: row => row.product_code ? <span className="font-mono text-xs text-brand-700 font-bold">{row.product_code}</span> : <span className="text-surface-300">—</span>, minWidth: '130px' },
-    { name: 'Material', selector: row => row.material_type, sortable: true, minWidth: '150px' },
-    { name: 'Color', selector: row => row.color, sortable: true, minWidth: '120px' },
-    { name: 'Pattern', selector: row => row.pattern || '-', sortable: true, minWidth: '110px' },
     { name: 'Width', selector: row => Number(row.width), sortable: true, right: true, cell: row => <span className="font-mono">{fmtRollWidth(row.width)}</span>, width: '100px' },
     { name: 'Length', selector: row => Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{Number(row.length).toFixed(2)}m</span>, width: '100px' },
     { name: 'Area', selector: row => Number(row.width) * Number(row.length), sortable: true, right: true, cell: row => <span className="font-mono">{formatArea(row.width, row.length)}</span>, width: '100px' },
@@ -2089,38 +2141,6 @@ function LeftoversView() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Material *</label>
-                  <input
-                    type="text"
-                    value={addForm.material_type}
-                    onChange={e => setAddForm(f => ({ ...f, material_type: e.target.value }))}
-                    placeholder="e.g. Polyester"
-                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Color *</label>
-                  <input
-                    type="text"
-                    value={addForm.color}
-                    onChange={e => setAddForm(f => ({ ...f, color: e.target.value }))}
-                    placeholder="e.g. White"
-                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Pattern</label>
-                  <input
-                    type="text"
-                    value={addForm.pattern}
-                    onChange={e => setAddForm(f => ({ ...f, pattern: e.target.value }))}
-                    placeholder="e.g. Plain"
-                    className="w-full px-3 py-2 text-sm border border-surface-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                </div>
-                <div>
                   <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">Product Code</label>
                   <input
                     type="text"
@@ -2133,7 +2153,7 @@ function LeftoversView() {
               </div>
               <div className="relative">
                 <label className="block text-xs font-bold text-surface-500 uppercase tracking-wider mb-1.5">
-                  Shades <span className="text-surface-400 font-normal normal-case">— type to search, comma-separate multiple</span>
+                  Shades * <span className="text-surface-400 font-normal normal-case">— type to search, comma-separate multiple</span>
                 </label>
                 <input
                   ref={shadesInputRef}
@@ -2186,7 +2206,7 @@ function LeftoversView() {
             <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Search</label>
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400" />
-              <input value={filters.q} onChange={e => updateFilters({ q: e.target.value })} placeholder="Material, color, pattern, job" className="w-full pl-9" />
+              <input value={filters.q} onChange={e => updateFilters({ q: e.target.value })} placeholder="Shade, product code, job" className="w-full pl-9" />
             </div>
           </div>
           <div className="md:col-span-6">
@@ -2245,7 +2265,7 @@ function LeftoverDetailPage({
             <ChevronLeft size={15} /> Back to leftovers
           </button>
           <h2 className="text-xl font-black text-surface-900">Leftover #{leftover.id}</h2>
-          <p className="text-sm text-surface-400 mt-1">{leftover.material_type} - {leftover.color} - {formatDate(leftover.created_at)}</p>
+          <p className="text-sm text-surface-400 mt-1">{leftover.shades || 'No shade'} - {formatDate(leftover.created_at)}</p>
         </div>
         <button onClick={onDelete} className="btn-ghost border border-red-200 bg-white text-red-500 hover:text-red-600">
           <Trash2 size={14} /> Delete
@@ -2268,9 +2288,6 @@ function LeftoverDetailPage({
           </div>
         </div>
         <div className="panel-body grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-          <DetailRow label="Material" value={leftover.material_type} />
-          <DetailRow label="Color" value={leftover.color} />
-          <DetailRow label="Pattern" value={leftover.pattern || '-'} />
           <DetailRow label="Product Code" value={leftover.product_code || '-'} />
           <DetailRow label="Original Roll" value={leftover.original_roll_id ? `#${leftover.original_roll_id}` : '-'} />
           <DetailRow label="Created" value={formatDate(leftover.created_at)} />
@@ -2652,8 +2669,6 @@ function PiecePreview({ items, onRemove, maxRollLength }: {
               <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Final H (&quot;)</th>
               <th className="text-right px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Qty</th>
               <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Roll Widths</th>
-              <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Material</th>
-              <th className="text-left px-4 py-2.5 font-bold text-surface-400 uppercase tracking-wider">Color</th>
               <th className="px-2 py-2.5 w-8"></th>
             </tr>
           </thead>
@@ -2693,8 +2708,6 @@ function PiecePreview({ items, onRemove, maxRollLength }: {
                       : <span className="text-surface-600">{item.selected_widths.map(fmtRollWidth).join(', ')}</span>
                     }
                   </td>
-                  <td className="px-4 py-3 text-surface-600">{item.material_type}</td>
-                  <td className="px-4 py-3 text-surface-600">{item.color}</td>
                   <td className="px-2 py-3 text-center">
                     <button
                       onClick={() => onRemove(item.id)}
@@ -2769,7 +2782,7 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
           <table className="w-full text-xs border-separate border-spacing-0">
             <thead className="sticky top-0 z-10">
               <tr className="bg-surface-50 shadow-sm">
-                {['#','Shade #','Type','Width (m)','Cut (in)','Height (m)','Valence (in)','Final H (m)','Qty','Material','Color','Pattern','Roll Widths'].map(h => (
+                {['#','Shade #','Type','Width (m)','Cut (in)','Height (m)','Valence (in)','Final H (m)','Qty','Roll Widths'].map(h => (
                   <th key={h} className="px-4 py-3 font-bold text-surface-400 uppercase tracking-wider border-b border-surface-200 text-left whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -2795,9 +2808,6 @@ function PiecesModal({ items, result, onClose }: { items: WorkOrderItem[]; resul
                     <td className="px-4 py-3 text-center">
                       <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-brand-100 text-brand-800 font-bold">{item.quantity}</span>
                     </td>
-                    <td className="px-4 py-3 text-surface-600">{item.material_type}</td>
-                    <td className="px-4 py-3 text-surface-600">{item.color}</td>
-                    <td className="px-4 py-3 text-surface-500">{item.pattern || '—'}</td>
                     <td className="px-4 py-3">
                       {item.selected_widths && item.selected_widths.length > 0
                         ? <div className="flex flex-wrap gap-1">
@@ -2847,11 +2857,11 @@ function SmartSuggestions({
 
   const totalQty = items.reduce((s, i) => s + i.quantity, 0)
   const patternedUnlocked = items.filter(i =>
-    !i.grain_locked && PATTERN_HINT_RE.test(`${i.pattern} ${i.color}`)
+    !i.grain_locked && PATTERN_HINT_RE.test(i.shade_number || '')
   )
   const widths = items.flatMap(i => i.selected_widths)
   const widthRange = widths.length > 0 ? Math.max(...widths) - Math.min(...widths) : 0
-  const bucketCount = new Set(items.map(i => `${i.material_type}|${i.color}|${i.pattern}`)).size
+  const bucketCount = new Set(items.map(i => (i.shade_number || '').trim() || i.product_code || 'unknown')).size
 
   type Suggestion = {
     key: string
@@ -2913,12 +2923,12 @@ function SmartSuggestions({
     })
   }
 
-  // 5. Many distinct material/colour/pattern buckets — informational only
+  // 5. Many distinct shade groups — informational only
   if (bucketCount >= 3) {
     suggestions.push({
       key: 'buckets',
       icon: <Package size={13} className="text-surface-500" />,
-      text: <><strong>{bucketCount} material/colour groups</strong> — each runs as its own packing pass automatically. Cross-group merging applies within each group.</>,
+      text: <><strong>{bucketCount} shade groups</strong> — each runs as its own packing pass automatically. Pieces of different shades never share a sheet.</>,
     })
   }
 

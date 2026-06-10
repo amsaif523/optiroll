@@ -9,9 +9,6 @@ export interface WorkOrderItem {
   height: number    // meters
   valence: number   // meters (entered in inches, converted on add)
   quantity: number
-  material_type: string
-  color: string
-  pattern: string
   selected_widths: number[]  // roll widths (meters) this piece can be cut from
   grain_locked?: boolean     // if true, this piece can't be rotated (striped/patterned fabric)
 }
@@ -35,10 +32,8 @@ export interface BlindPlaced {
 export interface CandidateLeftover {
   width: number          // meters
   length: number         // meters
-  material_type: string
-  color: string
-  pattern: string | null
   product_code?: string | null
+  shades: string | null  // ", "-separated shade(s) the offcut came from
   sheet_number: number
   source: 'offcut' | 'tail'
 }
@@ -70,9 +65,8 @@ export interface RollWidthSuggestion {
 export interface RollWidthGroup {
   roll_width: number
   roll_widths?: number[]   // distinct widths actually used across this group's sheets
-  material_type: string
-  color: string
-  pattern: string | null
+  shade_number: string | null
+  product_code: string | null
   item_count: number
   sheets: number
 }

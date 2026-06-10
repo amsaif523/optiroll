@@ -41,13 +41,9 @@ const initDB = async () => {
     CREATE TABLE IF NOT EXISTS rolls (
       id INT AUTO_INCREMENT PRIMARY KEY,
       width DECIMAL(5,2) NOT NULL COMMENT 'Roll width in meters',
-      material_type VARCHAR(50) NOT NULL COMMENT 'Fabric type',
-      color VARCHAR(50) NOT NULL,
-      pattern VARCHAR(50),
       status ENUM('available','empty') DEFAULT 'available',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_material (material_type, color, pattern),
       INDEX idx_status (status)
     )
   `);
@@ -58,14 +54,10 @@ const initDB = async () => {
       original_roll_id INT,
       width DECIMAL(5,2) NOT NULL,
       length DECIMAL(6,2) NOT NULL,
-      material_type VARCHAR(50) NOT NULL,
-      color VARCHAR(50) NOT NULL,
-      pattern VARCHAR(50),
       status ENUM('available','used') DEFAULT 'available',
       source_job_id INT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_material (material_type, color, pattern),
       INDEX idx_dimensions (width, length),
       INDEX idx_status (status)
     )
@@ -100,9 +92,6 @@ const initDB = async () => {
       valence DECIMAL(4,2) DEFAULT 0.00,
       final_height DECIMAL(5,2) NOT NULL,
       quantity INT NOT NULL DEFAULT 1,
-      material_type VARCHAR(50) NOT NULL,
-      color VARCHAR(50) NOT NULL,
-      pattern VARCHAR(50),
       selected_widths JSON NULL,
       grain_locked TINYINT(1) NOT NULL DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -120,14 +109,33 @@ const initDB = async () => {
       if (err.code !== 'ER_DUP_FIELDNAME') throw err;
     }
   };
-  await addColumnIfMissing('job_items', 'selected_widths', 'JSON NULL AFTER pattern');
+  await addColumnIfMissing('job_items', 'selected_widths', 'JSON NULL AFTER quantity');
   await addColumnIfMissing('job_items', 'grain_locked', 'TINYINT(1) NOT NULL DEFAULT 0 AFTER selected_widths');
   await addColumnIfMissing('job_items', 'product_id', 'INT DEFAULT NULL AFTER shade_number');
   await addColumnIfMissing('job_items', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER product_id');
   await addColumnIfMissing('job_items', 'cut', 'DECIMAL(5,2) NOT NULL DEFAULT 0.00 AFTER width');
-  await addColumnIfMissing('leftovers', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER pattern');
+  await addColumnIfMissing('leftovers', 'product_code', 'VARCHAR(100) DEFAULT NULL AFTER length');
   await addColumnIfMissing('leftovers', 'sheet_number', 'INT DEFAULT NULL AFTER product_code');
   await addColumnIfMissing('leftovers', 'shades', 'TEXT DEFAULT NULL AFTER sheet_number');
+
+  // material_type / color / pattern are no longer used anywhere — the fabric identity
+  // is now the shade (shade_number), with product_code as a fallback. Drop the legacy
+  // columns on older installs. The composite idx_material index is dropped automatically
+  // when its columns are removed. MySQL throws ER_CANT_DROP_FIELD_OR_KEY (1091) when the
+  // column is already absent — safe to ignore.
+  const dropColumnIfExists = async (table, column) => {
+    try {
+      await connection.query(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      console.log(`Dropped column ${table}.${column}`);
+    } catch (err) {
+      if (err.errno !== 1091) throw err;
+    }
+  };
+  for (const table of ['rolls', 'leftovers', 'job_items']) {
+    for (const column of ['material_type', 'color', 'pattern']) {
+      await dropColumnIfExists(table, column);
+    }
+  }
   // Widen shade_number — earlier installs capped at VARCHAR(50), which
   // overflowed when users mapped Shade # to a long Product Name column.
   try {

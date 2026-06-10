@@ -7,7 +7,7 @@ const DEFAULT_ROLL_LENGTH = 30;
 const WIDTH_TOL = 0.001;
 const DEFAULT_CUT_MODE = 'free'; // 'free' = MAXRECTS, 'guillotine' = ShelfPacker (real cross-cuts)
 const DEFAULT_LEFTOVER_THRESHOLD = 0.8; // leftover must be ≥ X × effective roll width to qualify
-const DEEP_TIME_BUDGET_MS = 15000; // per material bucket: max wall-clock for thorough random-restart search
+const DEEP_TIME_BUDGET_MS = 15000; // per shade bucket: max wall-clock for thorough random-restart search
 
 // ─── Global optimization scoring model ──────────────────────────────────────
 // A layout (one width's full set of sheets) is scored by a weighted blend of
@@ -313,25 +313,26 @@ class Optimizer {
       }
     }
 
-    // BUCKET by product_code (preferred — unique fabric identifier) or (material, color, pattern)
+    // BUCKET by SHADE (the fabric identity), falling back to product_code when a piece
+    // carries no shade. Pieces sharing a shade pack onto the same sheets; different shades
+    // never share a sheet. Leftovers are likewise matched by shade.
     const buckets = new Map();
     for (const item of items) {
-      const key = item.product_code
-        ? `product:${item.product_code}`
-        : `${item.material_type}|${item.color}|${item.pattern || ''}`;
+      const shade = (item.shade_number || '').trim();
+      const key = shade
+        ? `shade:${shade}`
+        : (item.product_code ? `product:${item.product_code}` : 'unknown');
       if (!buckets.has(key)) {
         buckets.set(key, {
+          shade_number: shade || null,
           product_code: item.product_code || null,
-          material_type: item.material_type,
-          color: item.color,
-          pattern: item.pattern || null,
           items: []
         });
       }
       buckets.get(key).items.push(item);
     }
 
-    // PER-SHEET WIDTH SELECTION: each material bucket is packed as ONE group. Phase 2
+    // PER-SHEET WIDTH SELECTION: each shade bucket is packed as ONE group. Phase 2
     // (see _packBucketBestLayout / _packGroupMultiWidth) chooses the roll width
     // INDEPENDENTLY for each sheet — sheet 1 may pack best on 2.5m while sheet 2 packs
     // best on 3.0m — so the program tries every allowed width on every sheet and keeps
@@ -352,10 +353,8 @@ class Optimizer {
       finalGroups.push({
         candidateWidths,
         items: bucket.items,
-        product_code: bucket.product_code,
-        material_type: bucket.material_type,
-        color: bucket.color,
-        pattern: bucket.pattern
+        shade_number: bucket.shade_number,
+        product_code: bucket.product_code
       });
     }
 
@@ -375,7 +374,7 @@ class Optimizer {
 
     for (const group of finalGroups) {
       const candidateWidths = group.candidateWidths;
-      const { product_code, material_type, color, pattern } = group;
+      const { product_code, shade_number } = group;
       // Reference width for the leftover-eligibility threshold (smallest usable width).
       const leftoverRefWidth = Math.min(...candidateWidths);
 
@@ -426,8 +425,7 @@ class Optimizer {
             piece_index: i,
             grain_locked: item.grain_locked === true,
             allowed_widths: allowedWidths,
-            product_code: item.product_code || product_code || null,
-            material_type, color, pattern
+            product_code: item.product_code || product_code || null
           });
         }
         itemIdx++;
@@ -436,7 +434,7 @@ class Optimizer {
       // PHASE 1: SMART leftover packing (skipped when use_leftovers=false)
       let eligibleLeftovers = [];
       if (this.useLeftovers) {
-        const leftovers = await Leftover.findByProductOrSignature(product_code, material_type, color, pattern);
+        const leftovers = await Leftover.findByShade(shade_number, product_code);
         eligibleLeftovers = leftovers.filter(l =>
           parseFloat(l.width) >= leftoverRefWidth * leftoverThreshold
         );
@@ -586,20 +584,19 @@ class Optimizer {
         sheetCounter++;
         const tailLength = sd.rollLength - sd.usedLength;
         if (tailLength >= MIN_REUSABLE_LENGTH && sd.rollWidth >= MIN_REUSABLE_WIDTH) {
+          const tailShadesStr = [...new Set(sd.placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
           this.candidateLeftovers.push({
             width: sd.rollWidth,
             length: tailLength,
-            material_type, color, pattern,
             product_code: product_code || null,
+            shades: tailShadesStr,
             sheet_number: sheetCounter,
             source: 'tail'
           });
           if (!this.preview && this.saveLeftovers) {
-            const tailShadesStr = [...new Set(sd.placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
             await Leftover.create({
               width: sd.rollWidth,
               length: tailLength,
-              material_type, color, pattern,
               product_code: product_code || null,
               sheet_number: sheetCounter,
               shades: tailShadesStr,
@@ -623,7 +620,7 @@ class Optimizer {
       rollWidthGroups.push({
         roll_width: widthsUsed[0] || 0,
         roll_widths: widthsUsed,
-        material_type, color, pattern,
+        shade_number, product_code,
         item_count: group.items.length,
         sheets: sheetCounter - groupSheetStart
       });
@@ -1442,14 +1439,13 @@ class Optimizer {
 
     // Record reusable offcuts as candidate leftovers (for the review sidebar),
     // regardless of preview/save mode.
+    const sheetShadesStr = [...new Set(placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
     for (const rl of reusableLeftovers) {
       this.candidateLeftovers.push({
         width: rl.width,
         length: rl.height,
-        material_type: placed[0].material_type,
-        color: placed[0].color,
-        pattern: placed[0].pattern,
         product_code: placed[0].product_code || null,
+        shades: sheetShadesStr,
         sheet_number: sheetNumber,
         source: 'offcut'
       });
@@ -1457,14 +1453,10 @@ class Optimizer {
 
     if (!preview) {
       if (this.saveLeftovers) {
-        const sheetShadesStr = [...new Set(placed.map(p => p.shade_number).filter(Boolean))].join(', ') || null;
         for (const rl of reusableLeftovers) {
           await Leftover.create({
             width: rl.width,
             length: rl.height,
-            material_type: placed[0].material_type,
-            color: placed[0].color,
-            pattern: placed[0].pattern,
             product_code: placed[0].product_code || null,
             sheet_number: sheetNumber,
             shades: sheetShadesStr,

@@ -9,7 +9,7 @@ const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
 export type FieldKey =
   | 'shade' | 'type' | 'width' | 'cut' | 'height' | 'valence'
-  | 'qty' | 'material' | 'color' | 'pattern' | 'widths'
+  | 'qty' | 'widths'
 
 export interface ImportPreviewProps {
   fileName: string
@@ -30,9 +30,6 @@ const FIELDS: { key: FieldKey; label: string; required: boolean; defaultText: st
   { key: 'height',   label: 'Height (")',             required: true,  defaultText: '' },
   { key: 'valence',  label: 'Valence (")',            required: false, defaultText: 'Default: 6"' },
   { key: 'qty',      label: 'Qty',                    required: false, defaultText: 'Default: 1' },
-  { key: 'material', label: 'Material',               required: false, defaultText: 'Default: Polyester' },
-  { key: 'color',    label: 'Color',                  required: false, defaultText: 'Default: White' },
-  { key: 'pattern',  label: 'Pattern',               required: false, defaultText: 'Default: Plain' },
   { key: 'widths',   label: 'Roll Widths (col)',      required: false, defaultText: 'Use default below' },
 ]
 
@@ -104,9 +101,6 @@ export default function ImportPreviewModal({
       heightIn: number
       valenceIn: number
       qty: number
-      material: string
-      color: string
-      pattern: string
       selectedWidths: number[]
     }
 
@@ -176,10 +170,6 @@ export default function ImportPreviewModal({
       const qtyParsed = mapping.qty !== undefined ? parseInt(String(r[mapping.qty] ?? ''), 10) : NaN
       const qty = isNaN(qtyParsed) || qtyParsed < 1 ? 1 : qtyParsed
 
-      const material = (mapping.material !== undefined ? String(r[mapping.material] ?? '').trim() : '') || 'Polyester'
-      const color    = (mapping.color    !== undefined ? String(r[mapping.color]    ?? '').trim() : '') || 'White'
-      const pattern  = (mapping.pattern  !== undefined ? String(r[mapping.pattern]  ?? '').trim() : '') || 'Plain'
-
       // Widths: row override > column mapping > default
       let selectedWidths: number[]
       if (rowOverrides[rowNum]?.widths !== undefined) {
@@ -219,14 +209,13 @@ export default function ImportPreviewModal({
         continue
       }
 
-      previewRows.push({ rowNum, shade, type: blindType, widthIn: widthRaw, cutIn, cutInStr, heightIn: heightRaw, valenceIn, qty, material, color, pattern, selectedWidths })
+      previewRows.push({ rowNum, shade, type: blindType, widthIn: widthRaw, cutIn, cutInStr, heightIn: heightRaw, valenceIn, qty, selectedWidths })
       items.push({
         id: crypto.randomUUID(),
         shade_number: shade,
         blind_type: blindType,
         width: widthM, cut: cutM, height: heightM, valence: valenceM,
         quantity: qty,
-        material_type: material, color, pattern,
         selected_widths: selectedWidths,
         grain_locked: false,
       })
@@ -443,17 +432,14 @@ export default function ImportPreviewModal({
                     <table className="w-full table-fixed text-[11px]">
                       <thead className="sticky top-0 z-10 bg-surface-100 border-b border-surface-200">
                         <tr className="text-surface-500 uppercase tracking-wider font-bold">
-                          <th className="px-3 py-2.5 text-left w-[19%]">Shade / Product</th>
-                          <th className="px-3 py-2.5 text-left w-[8%]">Type</th>
-                          <th className="px-3 py-2.5 text-right w-[6%]">W (&quot;)</th>
-                          <th className="px-3 py-2.5 text-right w-[7%]">Cut (&quot;)</th>
-                          <th className="px-3 py-2.5 text-right w-[6%]">H (&quot;)</th>
-                          <th className="px-3 py-2.5 text-right w-[5%]">Val (&quot;)</th>
-                          <th className="px-3 py-2.5 text-right w-[5%]">Qty</th>
-                          <th className="px-3 py-2.5 text-left w-[9%]">Material</th>
-                          <th className="px-3 py-2.5 text-left w-[9%]">Color</th>
-                          <th className="px-3 py-2.5 text-left w-[8%]">Pattern</th>
-                          <th className="px-3 py-2.5 text-left w-[18%]">Roll Widths</th>
+                          <th className="px-3 py-2.5 text-left w-[26%]">Shade / Product</th>
+                          <th className="px-3 py-2.5 text-left w-[9%]">Type</th>
+                          <th className="px-3 py-2.5 text-right w-[8%]">W (&quot;)</th>
+                          <th className="px-3 py-2.5 text-right w-[9%]">Cut (&quot;)</th>
+                          <th className="px-3 py-2.5 text-right w-[8%]">H (&quot;)</th>
+                          <th className="px-3 py-2.5 text-right w-[6%]">Val (&quot;)</th>
+                          <th className="px-3 py-2.5 text-right w-[6%]">Qty</th>
+                          <th className="px-3 py-2.5 text-left w-[28%]">Roll Widths</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -492,9 +478,6 @@ export default function ImportPreviewModal({
                             <td className="px-3 py-2 text-right font-mono text-surface-700">{p.heightIn}</td>
                             <td className="px-3 py-2 text-right font-mono text-surface-500">{p.valenceIn}</td>
                             <td className="px-3 py-2 text-right font-mono font-bold text-surface-800">{p.qty}</td>
-                            <td className="px-3 py-2 text-surface-600 break-words whitespace-normal">{p.material}</td>
-                            <td className="px-3 py-2 text-surface-600 break-words whitespace-normal">{p.color}</td>
-                            <td className="px-3 py-2 text-surface-600 break-words whitespace-normal">{p.pattern}</td>
                             <td className="px-3 py-2">
                               <button
                                 onClick={e => openWidthPicker(p.rowNum, e)}

@@ -34,9 +34,9 @@ exports.getDetail = async (req, res, next) => {
 
 exports.create = async (req, res, next) => {
   try {
-    const { width, length, material_type, color, pattern, product_code, shades } = req.body || {}
-    if (!width || !length || !material_type || !color) {
-      return res.status(400).json({ success: false, error: 'width, length, material_type and color are required' })
+    const { width, length, product_code, shades } = req.body || {}
+    if (!width || !length || !shades) {
+      return res.status(400).json({ success: false, error: 'width, length and shades are required' })
     }
     const w = parseFloat(width), l = parseFloat(length)
     if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(l) || l <= 0) {
@@ -44,11 +44,8 @@ exports.create = async (req, res, next) => {
     }
     const result = await Leftover.create({
       width: w, length: l,
-      material_type: String(material_type).trim(),
-      color: String(color).trim(),
-      pattern: pattern ? String(pattern).trim() : null,
       product_code: product_code ? String(product_code).trim() : null,
-      shades: shades ? String(shades).trim() : null,
+      shades: String(shades).trim(),
       sheet_number: null,
       source_job_id: null,
     })

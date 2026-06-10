@@ -53,9 +53,6 @@ export default function WorkOrderBuilder({
     height:   NaN,
     valence:  6,
     quantity: NaN,
-    material_type: 'Polyester',
-    color:   'White',
-    pattern: 'Plain',
     selected_widths: [] as number[],
     grain_locked: false,
   })
@@ -162,9 +159,6 @@ export default function WorkOrderBuilder({
       height:         heightM,
       valence:        valenceM,
       quantity:       form.quantity,
-      material_type:  form.material_type,
-      color:          form.color,
-      pattern:        form.pattern,
       selected_widths: form.selected_widths,
       grain_locked:   form.grain_locked,
     }])
@@ -241,12 +235,6 @@ export default function WorkOrderBuilder({
         // Pcs preferred over Qty/Quantity — for vendor quotes "Quantity" is often the SQFT total.
         const qty      = findCol('pcs', 'qty', 'quantity')
         if (qty      !== undefined) initial.qty = qty
-        const material = findCol('material')
-        if (material !== undefined) initial.material = material
-        const color    = findCol('color', 'colour')
-        if (color    !== undefined) initial.color = color
-        const pattern  = findCol('pattern')
-        if (pattern  !== undefined) initial.pattern = pattern
         const widths   = findCol('roll widths', 'roll width')
         if (widths   !== undefined) initial.widths = widths
 
@@ -508,9 +496,9 @@ export default function WorkOrderBuilder({
           </div>
         )}
 
-        {/* Row 2: Valence, Qty, Material, Color */}
+        {/* Row 2: Valence, Qty, Final Height */}
         <div className="grid grid-cols-12 gap-3">
-          <div className="col-span-3">
+          <div className="col-span-4">
             <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">
               Val (&quot;)
             </label>
@@ -522,7 +510,7 @@ export default function WorkOrderBuilder({
               className="w-full text-center placeholder:text-surface-300"
             />
           </div>
-          <div className="col-span-3">
+          <div className="col-span-4">
             <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Qty</label>
             <input
               type="number" min="1"
@@ -532,23 +520,7 @@ export default function WorkOrderBuilder({
               className="w-full text-center placeholder:text-surface-300"
             />
           </div>
-          <div className="col-span-3">
-            <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Material</label>
-            <input value={form.material_type} onChange={e => setForm(f => ({ ...f, material_type: e.target.value }))} className="w-full" />
-          </div>
-          <div className="col-span-3">
-            <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Color</label>
-            <input value={form.color} onChange={e => setForm(f => ({ ...f, color: e.target.value }))} className="w-full" />
-          </div>
-        </div>
-
-        {/* Row 3: Pattern + Final Height */}
-        <div className="grid grid-cols-12 gap-3">
-          <div className="col-span-6">
-            <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Pattern</label>
-            <input value={form.pattern} onChange={e => setForm(f => ({ ...f, pattern: e.target.value }))} className="w-full" />
-          </div>
-          <div className="col-span-6">
+          <div className="col-span-4">
             <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-wider mb-1.5">Final Height</label>
             <div className={`bg-surface-100 border border-surface-200 rounded-lg px-2 py-[9px] text-sm font-mono font-bold text-center ${
               finalHDisplay === null ? 'text-surface-400' : 'text-brand-600'

@@ -25,16 +25,13 @@ const pagedResult = (rows, total, page, limit) => ({
 
 const Roll = {
   create: async (data) => {
-    const sql = `INSERT INTO rolls (width, material_type, color, pattern) VALUES (?, ?, ?, ?)`;
-    const [result] = await pool.execute(sql, [data.width, data.material_type, data.color, data.pattern || null]);
+    const sql = `INSERT INTO rolls (width) VALUES (?)`;
+    const [result] = await pool.execute(sql, [data.width]);
     return { id: result.insertId, ...data };
   },
   findAll: async (filters = {}) => {
     let sql = 'SELECT * FROM rolls WHERE 1=1';
     const params = [];
-    if (filters.material_type) { sql += ' AND material_type = ?'; params.push(filters.material_type); }
-    if (filters.color) { sql += ' AND color = ?'; params.push(filters.color); }
-    if (filters.pattern) { sql += ' AND pattern = ?'; params.push(filters.pattern); }
     if (filters.status) { sql += ' AND status = ?'; params.push(filters.status); }
     sql += ' ORDER BY width ASC';
     return query(sql, params);
@@ -46,10 +43,9 @@ const Roll = {
 
 const Leftover = {
   create: async (data) => {
-    const sql = `INSERT INTO leftovers (original_roll_id, width, length, material_type, color, pattern, product_code, sheet_number, shades, source_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO leftovers (original_roll_id, width, length, product_code, sheet_number, shades, source_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await pool.execute(sql, [
       data.original_roll_id || null, data.width, data.length,
-      data.material_type, data.color, data.pattern || null,
       data.product_code || null, data.sheet_number || null,
       data.shades || null, data.source_job_id || null
     ]);
@@ -62,10 +58,9 @@ const Leftover = {
       Number.isFinite(parseFloat(r.length)) && parseFloat(r.length) > 0
     );
     if (valid.length === 0) return { inserted: 0 };
-    const sql = `INSERT INTO leftovers (original_roll_id, width, length, material_type, color, pattern, product_code, sheet_number, shades, source_job_id) VALUES ?`;
+    const sql = `INSERT INTO leftovers (original_roll_id, width, length, product_code, sheet_number, shades, source_job_id) VALUES ?`;
     const values = valid.map(r => [
       null, parseFloat(r.width), parseFloat(r.length),
-      r.material_type || null, r.color || null, r.pattern || null,
       r.product_code || null, r.sheet_number || null,
       r.shades || null, source_job_id || r.source_job_id || null
     ]);
@@ -75,9 +70,7 @@ const Leftover = {
   findAll: async (filters = {}) => {
     let sql = 'SELECT * FROM leftovers WHERE status = "available"';
     const params = [];
-    if (filters.material_type) { sql += ' AND material_type = ?'; params.push(filters.material_type); }
-    if (filters.color) { sql += ' AND color = ?'; params.push(filters.color); }
-    if (filters.pattern) { sql += ' AND pattern = ?'; params.push(filters.pattern); }
+    if (filters.product_code) { sql += ' AND product_code = ?'; params.push(filters.product_code); }
     sql += ' ORDER BY width ASC, length ASC';
     return query(sql, params);
   },
@@ -87,8 +80,8 @@ const Leftover = {
     let where = 'WHERE 1=1';
     const params = [];
     if (filters.q) {
-      where += ' AND (material_type LIKE ? OR color LIKE ? OR pattern LIKE ? OR product_code LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
-      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
+      where += ' AND (shades LIKE ? OR product_code LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
     }
     if (filters.date_from) {
       where += ' AND created_at >= ?';
@@ -137,22 +130,24 @@ const Leftover = {
       available_area: 0
     };
   },
-  findByMaterialSignature: async (material_type, color, pattern) => {
-    return query('SELECT * FROM leftovers WHERE status = "available" AND material_type = ? AND color = ? AND (pattern = ? OR pattern IS NULL) ORDER BY width ASC, length ASC',
-      [material_type, color, pattern || null]);
-  },
-  findByProductOrSignature: async (product_code, material_type, color, pattern) => {
-    if (product_code) {
+  // Leftovers are matched by SHADE now (the fabric identity), with product_code as a
+  // fallback. `shades` is stored ", "-separated, so FIND_IN_SET over a comma-normalised
+  // copy matches a single shade whether the sheet held one shade or several.
+  findByShade: async (shade_number, product_code) => {
+    if (shade_number) {
       const rows = await query(
-        'SELECT * FROM leftovers WHERE status = "available" AND product_code = ? ORDER BY width ASC, length ASC',
-        [product_code]
+        "SELECT * FROM leftovers WHERE status = 'available' AND FIND_IN_SET(?, REPLACE(shades, ', ', ',')) > 0 ORDER BY width ASC, length ASC",
+        [String(shade_number).trim()]
       );
       if (rows.length > 0) return rows;
     }
-    return query(
-      'SELECT * FROM leftovers WHERE status = "available" AND material_type = ? AND color = ? AND (pattern = ? OR pattern IS NULL) ORDER BY width ASC, length ASC',
-      [material_type, color, pattern || null]
-    );
+    if (product_code) {
+      return query(
+        'SELECT * FROM leftovers WHERE status = "available" AND product_code = ? ORDER BY width ASC, length ASC',
+        [product_code]
+      );
+    }
+    return [];
   },
   markUsed: async (id) => pool.execute('UPDATE leftovers SET status = "used" WHERE id = ?', [id]),
   updateDimensions: async (id, width, length) => {
@@ -175,8 +170,8 @@ const Leftover = {
     let where = 'WHERE 1=1';
     const params = [];
     if (filters.q) {
-      where += ' AND (material_type LIKE ? OR color LIKE ? OR pattern LIKE ? OR product_code LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
-      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
+      where += ' AND (shades LIKE ? OR product_code LIKE ? OR CAST(source_job_id AS CHAR) LIKE ?)';
+      params.push(`%${filters.q}%`, `%${filters.q}%`, `%${filters.q}%`);
     }
     if (filters.date_from) {
       where += ' AND created_at >= ?';
@@ -288,13 +283,12 @@ const JobItem = {
       : null;
     const grainLocked = data.grain_locked === true || data.grain_locked === 1 ? 1 : 0;
     const cut = Number.isFinite(parseFloat(data.cut)) && parseFloat(data.cut) > 0 ? parseFloat(data.cut) : 0;
-    const sql = `INSERT INTO job_items (job_id, shade_number, product_id, product_code, blind_type, width, cut, height, valence, final_height, quantity, material_type, color, pattern, selected_widths, grain_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO job_items (job_id, shade_number, product_id, product_code, blind_type, width, cut, height, valence, final_height, quantity, selected_widths, grain_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const [result] = await pool.execute(sql, [
       data.job_id, data.shade_number || null,
       data.product_id || null, data.product_code || null,
       data.blind_type, data.width, cut, data.height,
       data.valence || 0, final_height, data.quantity || 1,
-      data.material_type, data.color, data.pattern || null,
       selectedWidths, grainLocked
     ]);
     return { id: result.insertId, ...data, final_height };
