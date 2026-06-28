@@ -8,7 +8,7 @@ const IN_TO_M = 0.0254
 const fmtRollWidth = (v: number) => `${v.toFixed(3).replace(/\.?0+$/, '')}m`
 
 export type FieldKey =
-  | 'shade' | 'type' | 'width' | 'cut' | 'height' | 'valence'
+  | 'serial' | 'shade' | 'type' | 'width' | 'cut' | 'height' | 'valence'
   | 'qty' | 'widths'
 
 export interface ImportPreviewProps {
@@ -23,6 +23,7 @@ export interface ImportPreviewProps {
 }
 
 const FIELDS: { key: FieldKey; label: string; required: boolean; defaultText: string }[] = [
+  { key: 'serial',   label: 'Sr. No.',                required: false, defaultText: 'Auto-number (1, 2, 3…)' },
   { key: 'shade',    label: 'Shade # / Product Name', required: false, defaultText: 'Auto-generate (1, 2, 3…)' },
   { key: 'type',     label: 'Type',                   required: false, defaultText: 'Use default below' },
   { key: 'width',    label: 'Width (")',              required: true,  defaultText: '' },
@@ -93,6 +94,8 @@ export default function ImportPreviewModal({
   const computed = useMemo(() => {
     interface PreviewRow {
       rowNum: number
+      serial: string
+      serialSort: number
       shade: string
       type: 'roller' | 'zebra'
       widthIn: number
@@ -108,6 +111,7 @@ export default function ImportPreviewModal({
     const previewRows: PreviewRow[] = []
     const skipped: { row: number; reason: string }[] = []
     let autoShade = 1
+    let autoSerial = 1
 
     const widthCol  = mapping.width
     const heightCol = mapping.height
@@ -152,6 +156,14 @@ export default function ImportPreviewModal({
 
       const shadeCell = mapping.shade !== undefined ? String(r[mapping.shade] ?? '').trim() : ''
       const shade = shadeCell || String(autoShade++)
+
+      // Sr. No.: mapped column value (kept as-is for display) → otherwise auto-number.
+      // `serialSort` orders the imported pieces by their Sr. No. (numeric when possible).
+      const serialCell = mapping.serial !== undefined ? String(r[mapping.serial] ?? '').trim() : ''
+      const serial = serialCell || String(autoSerial)
+      const serialNum = parseFloat(serialCell)
+      const serialSort = serialCell !== '' && !isNaN(serialNum) ? serialNum : autoSerial
+      autoSerial++
 
       // Type: row override > column mapping > default
       let blindType: 'roller' | 'zebra'
@@ -209,9 +221,10 @@ export default function ImportPreviewModal({
         continue
       }
 
-      previewRows.push({ rowNum, shade, type: blindType, widthIn: widthRaw, cutIn, cutInStr, heightIn: heightRaw, valenceIn, qty, selectedWidths })
+      previewRows.push({ rowNum, serial, serialSort, shade, type: blindType, widthIn: widthRaw, cutIn, cutInStr, heightIn: heightRaw, valenceIn, qty, selectedWidths })
       items.push({
         id: crypto.randomUUID(),
+        serial,
         shade_number: shade,
         blind_type: blindType,
         width: widthM, cut: cutM, height: heightM, valence: valenceM,
@@ -221,7 +234,14 @@ export default function ImportPreviewModal({
       })
     }
 
-    return { items, previewRows, skipped }
+    // Import in Sr. No. order (stable for equal/NaN serials so original row order is kept).
+    const order = previewRows.map((_, i) => i).sort((a, b) =>
+      previewRows[a].serialSort - previewRows[b].serialSort || a - b
+    )
+    const sortedRows = order.map(i => previewRows[i])
+    const sortedItems = order.map(i => items[i])
+
+    return { items: sortedItems, previewRows: sortedRows, skipped }
   }, [mapping, dataRows, availableWidths, allowRotation, defaultType, defaultCutStr, defaultWidths, rowOverrides])
 
   const updateMapping = (key: FieldKey, value: string) => {
@@ -432,19 +452,21 @@ export default function ImportPreviewModal({
                     <table className="w-full table-fixed text-[11px]">
                       <thead className="sticky top-0 z-10 bg-surface-100 border-b border-surface-200">
                         <tr className="text-surface-500 uppercase tracking-wider font-bold">
-                          <th className="px-3 py-2.5 text-left w-[26%]">Shade / Product</th>
+                          <th className="px-3 py-2.5 text-left w-[6%]">Sr.</th>
+                          <th className="px-3 py-2.5 text-left w-[22%]">Shade / Product</th>
                           <th className="px-3 py-2.5 text-left w-[9%]">Type</th>
                           <th className="px-3 py-2.5 text-right w-[8%]">W (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[9%]">Cut (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[8%]">H (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[6%]">Val (&quot;)</th>
                           <th className="px-3 py-2.5 text-right w-[6%]">Qty</th>
-                          <th className="px-3 py-2.5 text-left w-[28%]">Roll Widths</th>
+                          <th className="px-3 py-2.5 text-left w-[26%]">Roll Widths</th>
                         </tr>
                       </thead>
                       <tbody>
                         {computed.previewRows.map((p, i) => (
                           <tr key={i} className={`border-b border-surface-100 hover:bg-brand-50/30 transition-colors align-top ${i % 2 === 0 ? '' : 'bg-surface-50/40'}`}>
+                            <td className="px-3 py-2 font-mono font-bold text-brand-700">{p.serial}</td>
                             <td className="px-3 py-2 font-mono font-bold text-surface-800 break-words whitespace-normal" title={p.shade}>
                               {p.shade}
                             </td>

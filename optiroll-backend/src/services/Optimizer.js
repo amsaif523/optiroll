@@ -414,6 +414,7 @@ class Optimizer {
             // index is included — otherwise pieces with the same id get removed together
             // and silently dropped during packing.
             id: `${item.shade_number || 'item'}_${itemIdx}_${i}`,
+            serial: item.serial != null ? String(item.serial) : null, // Sr. No. (shown on the plot)
             shade_number: item.shade_number || '',
             blind_type: item.blind_type,
             width: effWidth,           // packed/plotted width = ordered width − cut
@@ -1473,6 +1474,7 @@ class Optimizer {
       roll_length_used: usedLength,
       blinds_placed: placed.map(p => ({
         blind_id: p.id,
+        serial: p.serial != null ? String(p.serial) : null,
         shade_number: p.shade_number,
         piece_index: p.piece_index,
         x: p.x,

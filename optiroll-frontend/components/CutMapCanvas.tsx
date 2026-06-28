@@ -92,32 +92,92 @@ function drawRuler(
   drawLabel(totalIn)
 }
 
-function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  if (!text) return []
-  const words = text.split(/\s+/).filter(Boolean)
-  const lines: string[] = []
-  let current = ''
-  const pushBrokenWord = (word: string) => {
-    let buf = ''
-    for (const ch of word) {
-      const cand = buf + ch
-      if (ctx.measureText(cand).width <= maxWidth) { buf = cand }
-      else { if (buf) lines.push(buf); buf = ch }
-    }
-    if (buf) current = buf
+// Draws the stacked label for one placed blind. Leads with the Sr. No., emphasises the
+// W × H measurement, and — on tall, narrow pieces — rotates the whole block 90° so the
+// long side becomes the line-length budget (much more legible in print than tiny
+// horizontal text squeezed across a thin strip). Fonts are sized as large as the piece
+// allows, then shrunk only until the must-fit lines (serial / dims / cut) fit the width.
+function drawBlindLabel(
+  ctx: CanvasRenderingContext2D,
+  b: Sheet['blinds'][number],
+  bx: number, by: number, bw: number, bh: number
+) {
+  const isZebra = b.blind_type === 'zebra'
+  const serialStr = b.serial != null && String(b.serial).trim() !== '' ? `#${String(b.serial).trim()}` : null
+  const typeLabel = isZebra ? 'ZEBRA' : 'ROLLER'
+  const valenceStr = b.valence !== undefined && b.valence > 0 ? `Val ${fmtIn(b.valence)}"` : null
+  const hasCut = !!(b.cut && b.cut > 0)
+  const orderedW = b.ordered_width != null ? b.ordered_width : b.width
+  const wLabel = `${fmtIn(orderedW)}"`
+  const cutLen = `${fmtIn(b.height)}"`
+  const cutInline = hasCut ? `✂ ${fmtIn(b.cut!)}" → ${fmtIn(b.width)}"` : null
+
+  // line: t=text, w=weight, sz=size multiplier vs base, fill=colour, pri=keep-priority
+  // (lower = more important), wrap=excluded from the width-fit shrink (gets ellipsized).
+  type Line = { t: string; w: 'bold' | 'normal'; sz: number; fill: string; pri: number; wrap?: boolean }
+  let lines: Line[] = []
+  if (serialStr)      lines.push({ t: serialStr,            w: 'bold',   sz: 1.4,  fill: '#ffffff',              pri: 1 })
+  if (b.shade_number) lines.push({ t: b.shade_number,       w: 'bold',   sz: 0.95, fill: '#ffffff',              pri: 3, wrap: true })
+  lines.push({                     t: `${wLabel} × ${cutLen}`, w: 'bold', sz: 1.2, fill: '#ffffff',              pri: 2 })
+  lines.push({                     t: typeLabel,            w: 'normal', sz: 0.8,  fill: 'rgba(255,255,255,0.85)', pri: 5 })
+  if (valenceStr)     lines.push({ t: valenceStr,           w: 'normal', sz: 0.8,  fill: 'rgba(255,255,255,0.78)', pri: 6 })
+  if (cutInline)      lines.push({ t: cutInline,            w: 'bold',   sz: 0.85, fill: '#ffffff',              pri: 4 })
+  if (b.rotated)      lines.push({ t: '↻ 90°',              w: 'normal', sz: 0.72, fill: 'rgba(255,255,255,0.65)', pri: 7 })
+
+  // Labels are always drawn vertically (rotated 90°) so they run down the length of the
+  // piece — matches the roll's cutting direction and stays legible in print. crossDim is
+  // the per-line length budget (piece height); stackDim stacks the lines (piece width).
+  const vertical = true
+  const crossDim = vertical ? bh : bw
+  const stackDim = vertical ? bw : bh
+  const PAD = 6
+  const MIN_FONT = 7
+
+  // Drop the least-important lines when there isn't vertical room for them all.
+  const maxLines = Math.max(1, Math.floor((stackDim - PAD) / (MIN_FONT + 3)))
+  if (lines.length > maxLines) {
+    const keep = new Set([...lines].sort((a, c) => a.pri - c.pri).slice(0, maxLines))
+    lines = lines.filter(l => keep.has(l))
   }
-  for (const word of words) {
-    const candidate = current ? current + ' ' + word : word
-    if (ctx.measureText(candidate).width <= maxWidth) {
-      current = candidate
-    } else {
-      if (current) { lines.push(current); current = '' }
-      if (ctx.measureText(word).width <= maxWidth) { current = word }
-      else { pushBrokenWord(word) }
-    }
+  if (lines.length === 0) return
+
+  const sumSz = lines.reduce((s, l) => s + l.sz, 0)
+  let base = Math.min(
+    26,                                          // hard cap (print stays sensible)
+    (stackDim - PAD) / (sumSz + lines.length * 0.45),
+    crossDim                                      // never wider than the piece itself
+  )
+  base = Math.max(MIN_FONT, base)
+
+  // Shrink until every must-fit (non-wrap) line fits the cross dimension.
+  const maxLineLen = Math.max(8, crossDim - PAD * 2)
+  const mustFit = lines.filter(l => !l.wrap)
+  let guard = 0
+  const fits = () => mustFit.every(l => {
+    ctx.font = `${l.w === 'bold' ? 'bold ' : ''}${(base * l.sz).toFixed(1)}px Inter, sans-serif`
+    return ctx.measureText(l.t).width <= maxLineLen
+  })
+  while (base > MIN_FONT && !fits() && guard++ < 50) base *= 0.9
+
+  ctx.save()
+  ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip()
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.translate(bx + bw / 2, by + bh / 2)
+  if (vertical) ctx.rotate(-Math.PI / 2)
+
+  const lineHeights = lines.map(l => base * l.sz + 3)
+  const totalH = lineHeights.reduce((s, h) => s + h, 0)
+  let ly = -totalH / 2
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    ly += lineHeights[i] / 2
+    ctx.font = `${l.w === 'bold' ? 'bold ' : ''}${(base * l.sz).toFixed(1)}px Inter, sans-serif`
+    ctx.fillStyle = l.fill
+    ctx.fillText(ellipsize(ctx, l.t, maxLineLen), 0, ly)
+    ly += lineHeights[i] / 2
   }
-  if (current) lines.push(current)
-  return lines
+
+  ctx.restore()
 }
 
 function ellipsize(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
@@ -296,79 +356,7 @@ function renderCutMap(
     ctx.strokeRect(bx, by, bw, bh)
 
     if (showLabels) {
-      const typeLabel = isZebra ? 'ZEBRA' : 'ROLLER'
-      const valenceStr = b.valence !== undefined && b.valence > 0 ? `Val: ${fmtIn(b.valence)}"` : null
-      const hasCut   = !!(b.cut && b.cut > 0)
-      const orderedW = b.ordered_width != null ? b.ordered_width : b.width
-      const cutLen   = `${fmtIn(b.height)}"`
-      const wLabel   = `${fmtIn(orderedW)}"`
-
-      const fs = Math.min(12, Math.max(7, bw / 10))
-      const PAD = 6
-      const textMaxWidth = Math.max(10, bw - PAD * 2)
-
-      ctx.save()
-      ctx.beginPath(); ctx.rect(bx, by, bw, bh); ctx.clip()
-      ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-
-      // Inline cut string shown below valence: ✂ 1" → 9"
-      const cutInline = hasCut ? `✂ ${fmtIn(b.cut!)}" → ${fmtIn(b.width)}"` : null
-
-      if (bh > 80 && bw > 60) {
-        const shadeFs = Math.min(fs + 1, 13)
-        ctx.font = `bold ${shadeFs}px Inter, sans-serif`
-        const shadeLines = b.shade_number ? wrapText(ctx, b.shade_number, textMaxWidth) : []
-        const lineCount = shadeLines.length + 1 + 1 + (valenceStr ? 1 : 0) + (cutInline ? 1 : 0) + (b.rotated ? 1 : 0)
-        let lineY = by + bh / 2 - ((lineCount - 1) / 2) * (fs + 3)
-
-        if (shadeLines.length > 0) {
-          ctx.font = `bold ${shadeFs}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-          for (const line of shadeLines) {
-            ctx.fillText(line, bx + bw / 2, lineY); lineY += shadeFs + 2
-          }
-          lineY += 2
-        }
-
-        ctx.font = `bold ${fs}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-        ctx.fillText(`${wLabel} × ${cutLen}`, bx + bw / 2, lineY); lineY += fs + 3
-
-        ctx.font = `${fs - 1}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.85)'
-        ctx.fillText(typeLabel, bx + bw / 2, lineY); lineY += fs + 2
-
-        if (valenceStr) {
-          ctx.font = `${fs - 1}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.75)'
-          ctx.fillText(valenceStr, bx + bw / 2, lineY); lineY += fs + 2
-        }
-
-        if (cutInline) {
-          ctx.font = `bold ${fs - 1}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-          ctx.fillText(ellipsize(ctx, cutInline, textMaxWidth), bx + bw / 2, lineY); lineY += fs + 2
-        }
-
-        if (b.rotated) {
-          ctx.font = `${fs - 2}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.6)'
-          ctx.fillText('↻ 90°', bx + bw / 2, lineY)
-        }
-      } else if (bh > 36 && bw > 40) {
-        ctx.font = `bold ${fs}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-        const dimLine = `${wLabel} × ${cutLen}`
-        const shadeText = b.shade_number ? ellipsize(ctx, b.shade_number, textMaxWidth) : ellipsize(ctx, dimLine, textMaxWidth)
-        const linesCount = 2 + (cutInline ? 1 : 0)
-        const startY = by + bh / 2 - ((linesCount - 1) / 2) * (fs + 3)
-        ctx.fillText(shadeText, bx + bw / 2, startY)
-        ctx.font = `${fs - 1}px Inter, sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.8)'
-        ctx.fillText(ellipsize(ctx, b.shade_number ? dimLine : typeLabel, textMaxWidth), bx + bw / 2, startY + fs + 3)
-        if (cutInline) {
-          ctx.font = `bold ${fs - 1}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-          ctx.fillText(ellipsize(ctx, cutInline, textMaxWidth), bx + bw / 2, startY + (fs + 3) * 2)
-        }
-      } else if (bh > 18 || bw > 30) {
-        ctx.font = `bold ${Math.max(fs - 1, 7)}px Inter, sans-serif`; ctx.fillStyle = '#ffffff'
-        const mainLabel = b.shade_number || typeLabel
-        ctx.fillText(ellipsize(ctx, mainLabel, textMaxWidth), bx + bw / 2, by + bh / 2)
-      }
-
-      ctx.restore()
+      drawBlindLabel(ctx, b, bx, by, bw, bh)
     }
   }
 

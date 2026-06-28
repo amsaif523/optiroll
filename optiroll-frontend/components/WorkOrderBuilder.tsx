@@ -148,8 +148,15 @@ export default function WorkOrderBuilder({
       return
     }
 
+    // Next Sr. No. — continue past the highest numeric serial already in the list.
+    const nextSerial = items.reduce((mx, it) => {
+      const n = parseFloat(String(it.serial ?? ''))
+      return Number.isFinite(n) && n > mx ? n : mx
+    }, 0) + 1
+
     onChange([...items, {
       id: crypto.randomUUID(),
+      serial:         String(nextSerial),
       shade_number:   form.shade_number,
       product_id:     form.product_id,
       product_code:   form.product_code,
@@ -221,6 +228,8 @@ export default function WorkOrderBuilder({
         }
 
         const initial: Partial<Record<FieldKey, number>> = {}
+        const serial   = findCol('sr no', 'sr.', 's.no', 'sl no', 'sr', 'serial')
+        if (serial   !== undefined) initial.serial = serial
         const shade    = findCol('product name', 'item name', 'shade', 'sr no', 'sr.', 's.no', 'sl no', 'sno')
         if (shade    !== undefined) initial.shade = shade
         const type     = findCol('type', 'blind type')

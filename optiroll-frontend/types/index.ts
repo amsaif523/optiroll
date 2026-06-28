@@ -1,5 +1,6 @@
 export interface WorkOrderItem {
   id: string
+  serial?: string        // Sr. No. from the Excel import (or auto-assigned) — shown on the plot
   shade_number: string
   product_id?: number | null
   product_code?: string | null
@@ -15,6 +16,7 @@ export interface WorkOrderItem {
 
 export interface BlindPlaced {
   blind_id: string
+  serial?: string        // Sr. No. carried from the work-order item
   shade_number: string
   piece_index: number
   x: number
